@@ -329,8 +329,25 @@ class VisualTactileSensor:
                 obs['points'] = self.get_init_pts()
             elif data_type == 'pose':
                 obs['pose'] = self.get_attach_pose().totensor()
+            elif data_type == 'contact_force':
+                obs['contact_force'] = self._get_contact_force()
         return obs
-    
+
+    def _get_contact_force(self):
+        """[PATCH-A] per-vertex physical contact force (N_v,3) world frame, sparse (contact verts nonzero),
+        vertex order aligned with self.gelpad.data.nodal_pos_w."""
+        idx, grad = self.uipc_sim.get_contact_gradient()
+        offs = self.uipc_sim._system_vertex_offsets["uipc::backend::cuda::GlobalVertexManager"]
+        start = int(offs[self.gelpad.global_system_id])
+        num_v = self.gelpad.data.nodal_pos_w.shape[0]
+        dense = torch.zeros((num_v, 3), dtype=torch.float32, device=self.device)
+        if idx.shape[0] > 0:
+            m = (idx >= start) & (idx < start + num_v)
+            if m.any():
+                loc = torch.as_tensor(idx[m] - start, device=self.device, dtype=torch.long)
+                dense[loc] = torch.as_tensor(-grad[m], dtype=torch.float32, device=self.device)
+        return dense
+
     def _reset_idx(self):
         self.init_pose_mat = self.get_attach_pose().to_transformation_matrix()
         # self.gelpad.write_vertex_positions_to_sim(vertex_positions=self.gelpad.init_vertex_pos)

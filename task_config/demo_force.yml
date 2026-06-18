@@ -1,5 +1,5 @@
 decimation: 1
-episode_num: 5
+episode_num: 100
 observations:
   actor: true
   camera:
@@ -13,9 +13,11 @@ observations:
   - marker
   - depth
   - pose
+  - points
+  - contact_force
 random_texture: false
 render_frequency: 0
-save_dir: ./data
+save_dir: ./data_force
 save_frequency: 2
 sensor_type: gsmini
 use_seed: true

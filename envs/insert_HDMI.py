@@ -1,5 +1,6 @@
 from ._base_task import *
 import numpy as np
+import torchvision
 
 @configclass
 class TaskCfg(BaseTaskCfg):
@@ -7,7 +8,7 @@ class TaskCfg(BaseTaskCfg):
         CameraCfg(
             name="head",
             prim_path="/World/envs/env_.*/Camera",
-            offset=CameraCfg.OffsetCfg(pos=(0.74, 0.0, 0.066), rot=(0.512, 0.512, 0.487, 0.487), convention="opengl"),
+            offset=CameraCfg.OffsetCfg(pos=(0.74, 0.0, 0.14), rot=(0.611, 0.389, 0.370, 0.581), convention="opengl"),
             data_types=["rgb", "depth"],
             spawn=sim_utils.PinholeCameraCfg(
                 focal_length=2.5, focus_distance=1.0, horizontal_aperture=3.6, clipping_range=(0.1, 100.0)
@@ -27,6 +28,7 @@ class TaskCfg(BaseTaskCfg):
         )
     ]
     step_lim = 600
+    video_size = (640, 640)
 
 class Task(BaseTask):
     def __init__(self, cfg: BaseTaskCfg, mode:Literal['collect', 'eval'] = 'collect', render_mode: str|None = None, **kwargs):
@@ -34,6 +36,23 @@ class Task(BaseTask):
         cfg.sim.physics_material.static_friction = 2.5
         cfg.uipc_sim.contact.default_friction_ratio = 2.5
         super().__init__(cfg, mode, render_mode, **kwargs)
+
+    def get_frame_shot(self, obs):
+        """2x2 grid: L-Tactile | R-Tactile / Wrist | Head"""
+        Q = 320  # quadrant size
+        resize = torchvision.transforms.Resize((Q, Q))
+
+        lt = resize(obs['tactile']['left_tactile']['rgb_marker'].clone().permute(2, 0, 1)).permute(1, 2, 0)
+        rt = resize(obs['tactile']['right_tactile']['rgb_marker'].clone().permute(2, 0, 1)).permute(1, 2, 0)
+        wr = resize(obs['observation']['wrist']['rgb'].clone().permute(2, 0, 1)).permute(1, 2, 0)
+        hd = resize(obs['observation']['head']['rgb'].clone().permute(2, 0, 1)).permute(1, 2, 0)
+
+        img = torch.zeros((Q * 2, Q * 2, 3), dtype=hd.dtype)
+        img[:Q, :Q, :] = lt
+        img[:Q, Q:, :] = rt
+        img[Q:, :Q, :] = wr
+        img[Q:, Q:, :] = hd
+        return img
 
     def create_actors(self):
         base_pose = Pose([0.55, 0.0, 0.002], [1, 0, 0, 0])

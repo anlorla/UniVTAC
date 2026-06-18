@@ -3,6 +3,7 @@ import numpy as np
 
 @configclass
 class TaskCfg(BaseTaskCfg):
+    step_lim = 600
     adaptive_grasp_depth_threshold = 27.5
 
 class Task(BaseTask):

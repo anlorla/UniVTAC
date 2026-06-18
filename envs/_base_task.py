@@ -1,3 +1,4 @@
+import os
 import sys
 import json
 import time
@@ -90,7 +91,7 @@ class BaseTaskCfg(DirectRLEnvCfg):
     save_frequency = 1
     video_frequency = 1
     render_frequency = 0
-    video_size = (960, 320)
+    video_size = (960, 560)
 
     ui_window_class_type = BaseEnvWindow
 
@@ -479,19 +480,20 @@ class BaseTask(UipcRLEnv):
     def get_frame_shot(self, obs):
         head_obs = obs['observation']['head']['rgb'].clone()
         wrist_obs = obs['observation']['wrist']['rgb'].clone()
-        tac_size = 160
+        tac_size = 240
         left_tac = torchvision.transforms.Resize((tac_size, tac_size))(
             obs['tactile']['left_tactile']['rgb_marker'].clone().permute(2, 0, 1)).permute(1, 2, 0)
         right_tac = torchvision.transforms.Resize((tac_size, tac_size))(
             obs['tactile']['right_tactile']['rgb_marker'].clone().permute(2, 0, 1)).permute(1, 2, 0)
 
-        img = torch.zeros((320, 480*2+160, 3), dtype=head_obs.dtype)
-        img[:, :480, :] = torchvision.transforms.Resize(
+        # 布局:相机在上(不遮挡),触觉gel图并排放下方,各自居中对齐其相机
+        img = torch.zeros((320+tac_size, 480*2, 3), dtype=head_obs.dtype)
+        img[:320, :480, :] = torchvision.transforms.Resize(
             (320, 480))(head_obs.permute(2, 0, 1)).permute(1, 2, 0)
-        img[:, 480:480*2, :] = torchvision.transforms.Resize(
+        img[:320, 480:, :] = torchvision.transforms.Resize(
             (320, 480))(wrist_obs.permute(2, 0, 1)).permute(1, 2, 0)
-        img[:tac_size, 480*2:, :] = left_tac
-        img[tac_size:, 480*2:, :] = right_tac
+        img[320:320+tac_size, 120:120+tac_size, :] = left_tac    # 左触觉 居中于head相机下
+        img[320:320+tac_size, 600:600+tac_size, :] = right_tac   # 右触觉 居中于wrist相机下
         return img
 
     @staticmethod
@@ -834,6 +836,28 @@ class BaseTask(UipcRLEnv):
             exec_success = self.move([
                 Action(action='all', target_pose=target_pose, target_gripper_pos=target_gripper_pos)
             ], delay=False)
+        elif action_type == 'ee_ik':
+            # EE->IK->joint: execute SUBSAMPLED curobo trajectory (smooth, avoids teleport-jump/retreat)
+            target_pose = Pose(p=action[:3], q=action[3:7])
+            arm_plan = self._robot_manager.plan_arm(target_pose)
+            if arm_plan['status'] == 'Success':
+                _pos = arm_plan['position']; _vel = arm_plan['velocity']
+                _n = int(_pos.shape[0])
+                _k = int(os.environ.get('UNIVTAC_IK_STEPS', '6'))
+                if _k <= 1:
+                    _idxs = [_n - 1]
+                elif _n <= _k:
+                    _idxs = list(range(_n))
+                else:
+                    _idxs = sorted(set(np.linspace(0, _n - 1, _k).astype(int).tolist()))
+                for _i in _idxs:
+                    self._robot_manager.set_arm(_pos[_i], _vel[_i], force=force)
+                    self._robot_manager.set_gripper(action[-1], force=force)
+                    self._step()
+            else:
+                self.logger.warning('ee_ik plan failed, holding arm')
+                self._robot_manager.set_gripper(action[-1], force=force)
+                self._step()
         elif action_type == 'delta_ee':
             ee_pose = self._robot_manager.get_ee_pose()
             ee_next_pose = ee_pose.add_bias(action[:3], coord='world')\
