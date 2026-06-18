@@ -188,6 +188,10 @@ class BaseTaskCfg(DirectRLEnvCfg):
     robot: RobotCfg = None
     tactile_sensor_type:Literal['gsmini', 'xensews', 'gf225'] = 'gsmini'
 
+    # 双臂: 开启后额外建第二条臂(arm B), 其 cfg 放在 robot_b。默认关闭, 单臂任务不受影响。
+    dual_arm: bool = False
+    robot_b: RobotCfg = None
+
     planner_time_dilation_factor: float = 1.0
 
     gaussian_noise_cfg: GaussianNoiseCfg = GaussianNoiseCfg(mean=0.0, std=0.002, operation="add")
@@ -233,6 +237,7 @@ class BaseTask(UipcRLEnv):
         self.eval_success = False
         self.in_pre_move = False
         self.last_qpos = None
+        self._welds = []   # 刚性绑定: (actor, robot_manager, rel_mat) 每步令 actor 跟随夹爪(完美夹持不滑脱)
         self.keep_still_times = 0
         self.atom_tag = ''
         self.atom_id = 0
@@ -244,14 +249,24 @@ class BaseTask(UipcRLEnv):
 
         # add handle for debug visualization (this is set to a valid handle inside set_debug_vis)
         self._robot_manager.setup()
+        if self.cfg.dual_arm:
+            self._robot_manager_b.setup()
         self._camera_manager.setup()
         self._tactile_manager.setup()
         self._tactile_manager.set_debug_vis(self.cfg.debug_vis)
+        if self.cfg.dual_arm:
+            self._tactile_manager_b.setup()
+            self._tactile_manager_b.set_debug_vis(self.cfg.debug_vis)
         self.set_debug_vis(self.cfg.debug_vis)
     
     def load_robot_and_sensors(self, cfg:BaseTaskCfg):
         data_type = ["camera_depth", "tactile_rgb", "marker_rgb", "marker_motion"]
-        if cfg.tactile_sensor_type == 'gsmini':
+        if cfg.dual_arm:
+            # 双臂目前仅支持 gsmini(两条 Franka, 基座各自偏移)
+            if cfg.tactile_sensor_type != 'gsmini':
+                raise ValueError('dual_arm 目前仅支持 tactile_sensor_type="gsmini"')
+            cfg.robot, cfg.robot_b = create_franka_gsmini_gripper_dual(data_type=data_type)
+        elif cfg.tactile_sensor_type == 'gsmini':
             cfg.robot = create_franka_gsmini_gripper(data_type=data_type)
         elif cfg.tactile_sensor_type == 'gf225':
             cfg.robot = create_franka_gf225_gripper(data_type=data_type)
@@ -259,7 +274,7 @@ class BaseTask(UipcRLEnv):
             cfg.robot = create_franka_xensews_gripper(data_type=data_type)
         else:
             raise ValueError(f'Unknown tactile sensor type: {cfg.tactile_sensor_type}')
-        
+
         if cfg.adaptive_grasp_depth_threshold is None:
             cfg.adaptive_grasp_depth_threshold = cfg.robot.adaptive_grasp_depth_threshold
         return cfg
@@ -298,15 +313,29 @@ class BaseTask(UipcRLEnv):
         # add sensors
         self._camera_manager = CameraManager(self.cfg.cameras, self)
         self._tactile_manager = TactileManager(self.cfg.robot.tactiles, self)
+        if self.cfg.dual_arm:
+            self._tactile_manager_b = TactileManager(
+                self.cfg.robot_b.tactiles, self, robot_manager=self._robot_manager_b)
 
     def _setup_base_scene(self):
         # add robot
         self._robot_manager:RobotManager = RobotManager(
             robot_cfg=self.cfg.robot,
             task=self,
-            planner_time_dilation_factor=self.cfg.planner_time_dilation_factor
+            planner_time_dilation_factor=self.cfg.planner_time_dilation_factor,
+            name='robot',
         )
         self.atom:Atom = Atom(self)
+        self.atom_a:Atom = self.atom
+
+        if self.cfg.dual_arm:
+            self._robot_manager_b:RobotManager = RobotManager(
+                robot_cfg=self.cfg.robot_b,
+                task=self,
+                planner_time_dilation_factor=self.cfg.planner_time_dilation_factor,
+                name='robot_b',
+            )
+            self.atom_b:Atom = Atom(self, robot_manager=self._robot_manager_b)
 
         self.plate = RigidObject(self.cfg.plate)
 
@@ -443,9 +472,13 @@ class BaseTask(UipcRLEnv):
 
         if self.cfg.random_texture:
             Actor._set_texture('/World/envs/env_0/ground_plate', 'random', self.rng)
+        self._welds = []   # 清掉上一回合的刚性绑定
         self._tactile_manager._reset_idx()
         self._actor_manager._reset_idx(self.rng)
         self._robot_manager._reset_idx()
+        if self.cfg.dual_arm:
+            self._tactile_manager_b._reset_idx()
+            self._robot_manager_b._reset_idx()
 
         self.plan_success = True
         self.eval_success = False
@@ -474,26 +507,39 @@ class BaseTask(UipcRLEnv):
         self.scene.update(dt=dt)
         self._actor_manager.update(dt=dt)
         self._tactile_manager.update(dt=dt, force_recompute=True)
- 
+        if self.cfg.dual_arm:
+            self._tactile_manager_b.update(dt=dt, force_recompute=True)
+
         self.last_render = self.step_count
     
     def get_frame_shot(self, obs):
-        head_obs = obs['observation']['head']['rgb'].clone()
-        wrist_obs = obs['observation']['wrist']['rgb'].clone()
-        tac_size = 240
-        left_tac = torchvision.transforms.Resize((tac_size, tac_size))(
-            obs['tactile']['left_tactile']['rgb_marker'].clone().permute(2, 0, 1)).permute(1, 2, 0)
-        right_tac = torchvision.transforms.Resize((tac_size, tac_size))(
-            obs['tactile']['right_tactile']['rgb_marker'].clone().permute(2, 0, 1)).permute(1, 2, 0)
+        tac_size = 160
 
-        # 布局:相机在上(不遮挡),触觉gel图并排放下方,各自居中对齐其相机
-        img = torch.zeros((320+tac_size, 480*2, 3), dtype=head_obs.dtype)
-        img[:320, :480, :] = torchvision.transforms.Resize(
-            (320, 480))(head_obs.permute(2, 0, 1)).permute(1, 2, 0)
-        img[:320, 480:, :] = torchvision.transforms.Resize(
-            (320, 480))(wrist_obs.permute(2, 0, 1)).permute(1, 2, 0)
-        img[320:320+tac_size, 120:120+tac_size, :] = left_tac    # 左触觉 居中于head相机下
-        img[320:320+tac_size, 600:600+tac_size, :] = right_tac   # 右触觉 居中于wrist相机下
+        def cam480(name):
+            return torchvision.transforms.Resize((320, 480))(
+                obs['observation'][name]['rgb'].clone().permute(2, 0, 1)).permute(1, 2, 0)
+
+        def tac(name):
+            return torchvision.transforms.Resize((tac_size, tac_size))(
+                obs['tactile'][name]['rgb_marker'].clone().permute(2, 0, 1)).permute(1, 2, 0)
+
+        # 相机面板: head + 所有腕相机(单臂 1 个 wrist, 双臂 wrist + wrist_b)
+        cam_names = [n for n in ['head', 'wrist', 'wrist_b']
+                     if n in obs['observation'] and 'rgb' in obs['observation'][n]]
+        # 触觉: 单臂 2(left/right), 双臂 4(再加 *_b); 每列上下两个
+        tac_names = [n for n in ['left_tactile', 'right_tactile', 'left_tactile_b', 'right_tactile_b']
+                     if n in obs['tactile']]
+        n_cols = max(1, (len(tac_names) + 1) // 2)
+
+        first = cam480(cam_names[0])
+        W = 480 * len(cam_names) + tac_size * n_cols
+        img = torch.zeros((320, W, 3), dtype=first.dtype)
+        for i, name in enumerate(cam_names):
+            img[:, 480*i:480*(i+1), :] = first if i == 0 else cam480(name)
+        x_tac = 480 * len(cam_names)
+        for i, name in enumerate(tac_names):
+            col, row = i // 2, i % 2
+            img[row*tac_size:(row+1)*tac_size, x_tac + col*tac_size: x_tac + (col+1)*tac_size, :] = tac(name)
         return img
 
     @staticmethod
@@ -544,6 +590,18 @@ class BaseTask(UipcRLEnv):
         save_freq = (self.cfg.video_frequency > 0 and self.step_count % self.cfg.save_frequency == 0)
         video_freq = (self.cfg.video_frequency > 0 and self.step_count % self.cfg.video_frequency == 0)
         render_freq = (self.cfg.render_frequency > 0 and self.step_count % self.cfg.render_frequency == 0)
+
+        # 双臂: 在脚本执行阶段(非 reset/pre_move)每步把两条臂都瞬移到各自当前目标。
+        # 主动臂=按轨迹前进(与 force-teleport 一致), 被动臂=冻结在抓取姿态、维持夹持力
+        # (否则只 teleport 主动臂, 被动臂松爪掉物)。reset settling 阶段不做(省时、不干扰落物)。
+        if self.cfg.dual_arm and not self.in_pre_move:
+            self._robot_manager.reassert()
+            self._robot_manager_b.reassert()
+        # 刚性绑定的在手物体: 每步设其位姿=夹爪当前位姿∘抓取时相对变换(完美夹持, 不会滑脱)
+        if self._welds and not self.in_pre_move:
+            for actor, rm, rel in self._welds:
+                g = rm.get_gripper_center_pose().to_transformation_matrix()
+                actor.set_pose(Pose.from_matrix(g @ rel))
 
         self.scene.write_data_to_sim()
         for _ in range(self.cfg.decimation):
@@ -630,6 +688,17 @@ class BaseTask(UipcRLEnv):
             obs['tactile'] = self._tactile_manager.get_observations(self.cfg.obs_data_type['tactile'])
         if 'actor' in self.cfg.obs_data_type:
             obs['actor'] = self._actor_manager.get_observations()
+
+        # 双臂: arm B 的本体放在独立 key 'embodiment_b'(保持 arm A 结构不变),
+        # arm B 触觉(名带 _b)并入同一 obs['tactile'] dict。
+        if self.cfg.dual_arm:
+            obs['embodiment_b'] = {}
+            if 'embodiment' in self.cfg.obs_data_type:
+                obs['embodiment_b'] = self._robot_manager_b.get_observations(
+                    self.cfg.obs_data_type['embodiment'])
+            if 'tactile' in self.cfg.obs_data_type:
+                obs['tactile'].update(
+                    self._tactile_manager_b.get_observations(self.cfg.obs_data_type['tactile']))
         return obs
     
     def clean_cache(self, mean_steps:float=0.0, result:str=None):
@@ -682,6 +751,65 @@ class BaseTask(UipcRLEnv):
     def check_success(self):
         return False
     
+    def weld_actor(self, actor, rm):
+        """把已抓住的 actor 刚性绑定到 rm 的夹爪: 记录抓取时的相对变换, 之后每步令 actor 跟随夹爪。
+        用于扁/圆等不稳抓取的物体(脚本式 demo 的"完美夹持"), 避免被推/扰动时滑脱。"""
+        g = rm.get_gripper_center_pose().to_transformation_matrix()
+        a = actor.get_pose().to_transformation_matrix()
+        self._welds.append((actor, rm, np.linalg.inv(g) @ a))
+
+    def _arm(self, arm:Literal['a', 'b']='a'):
+        """按 arm 标签取 (robot_manager, tactile_manager)。'a'=主臂(默认), 'b'=第二臂。"""
+        if arm == 'b':
+            return self._robot_manager_b, self._tactile_manager_b
+        return self._robot_manager, self._tactile_manager
+
+    def _plan_control_seq(self, action, idx, constraint_pose, time_dilation_factor,
+                          gripper_depth_threshold, rm):
+        """为单个 action 规划 arm/gripper 控制序列(指定臂 rm)。失败时返回 None。"""
+        control_seq = {"arm": None, "gripper": None}
+        if action.action == 'move' or action.action == 'all':
+            action.args['constraint_pose'] = action.args.get('constraint_pose', constraint_pose)
+            action.args['time_dilation_factor'] = action.args.get(
+                'time_dilation_factor', time_dilation_factor)
+            control_seq['arm'] = rm.plan_arm(
+                action.target_pose,
+                pre_dis=action.args.get('pre_dis'),
+                constraint_pose=action.args['constraint_pose'],
+                time_dilation_factor=action.args['time_dilation_factor'],
+            )
+            if control_seq['arm']['status'] == 'Fail':
+                self.logger.error(f'Arm motion planning failed on action {idx}: {action.__str__()}')
+                if self.cfg.debug_vis:
+                    add_visual_box(action.target_pose, 'failed_target')
+                    self.delay(100)
+                self.plan_success = False
+                return None
+            if self.cfg.debug_vis:
+                add_visual_box(action.target_pose, 'target')
+
+        if action.action == 'gripper' or action.action == 'all':
+            if self.mode in ['collect', 'eval_test'] or (self.mode == 'eval' and self.in_pre_move):
+                if self.cfg.use_adaptive_grasp:
+                    target_pos = rm.gripper_percent2qpos(action.target_gripper_pos)
+                    control_seq['gripper'] = {
+                        'status': 'success',
+                        'num_steps': -1,
+                        'target': target_pos,
+                        'threshold': action.args.get('gripper_depth_threshold', gripper_depth_threshold)
+                    }
+                else:
+                    control_seq['gripper'] = rm.plan_gripper(
+                        action.target_gripper_pos, type='percent')
+            else:
+                control_seq['gripper'] = rm.plan_gripper(
+                    action.target_gripper_pos, type='qpos')
+            if control_seq['gripper']['status'] == 'Fail':
+                self.logger.error(f'Gripper motion planning failed on action {idx}: {action.__str__()}')
+                self.plan_success = False
+                return None
+        return control_seq
+
     def move(
         self,
         actions: list[Action],
@@ -690,71 +818,88 @@ class BaseTask(UipcRLEnv):
         delay: bool = True,
         constraint_pose = None,
         time_dilation_factor = None,
-        gripper_depth_threshold = None
+        gripper_depth_threshold = None,
+        arm:Literal['a', 'b'] = 'a',
     ):
         """
-        Take action for the robot.
+        Take action for the robot. arm='a'(默认主臂) / 'b'(第二臂, 需 dual_arm)。
         """
         if self.plan_success is False:
             return False
-        
+
         self.atom_id += 1
         self.atom_tag = tag
+        rm, tm = self._arm(arm)
 
         for idx, action in enumerate(actions):
-            control_seq = {
-                "arm": None,
-                "gripper": None,
-            }
-            if action.action == 'move' or action.action == 'all':
-                action.args['constraint_pose'] = action.args.get(
-                    'constraint_pose', constraint_pose)
-                action.args['time_dilation_factor'] = action.args.get(
-                    'time_dilation_factor', time_dilation_factor)
-                control_seq['arm'] = self._robot_manager.plan_arm(
-                    action.target_pose,
-                    pre_dis=action.args.get('pre_dis'),
-                    constraint_pose=action.args['constraint_pose'],
-                    time_dilation_factor=action.args['time_dilation_factor'],
-                )
-                if control_seq['arm']['status'] == 'Fail':
-                    self.logger.error(f'Arm motion planning failed on action {idx}: {action.__str__()}')
-                    if self.cfg.debug_vis:
-                        add_visual_box(action.target_pose, 'failed_target')
-                        self.delay(100)
-                    self.plan_success = False
-                    return False
-
-                if self.cfg.debug_vis:
-                    add_visual_box(action.target_pose, 'target')
-
-            if action.action == 'gripper' or action.action == 'all':
-                if self.mode in ['collect', 'eval_test'] or (self.mode == 'eval' and self.in_pre_move):
-                    if self.cfg.use_adaptive_grasp:
-                        target_pos = self._robot_manager.gripper_percent2qpos(action.target_gripper_pos)
-                        control_seq['gripper'] = {
-                            'status': 'success',
-                            'num_steps': -1,
-                            'target': target_pos,
-                            'threshold': action.args.get('gripper_depth_threshold', gripper_depth_threshold)
-                        }
-                    else:
-                        control_seq['gripper'] = self._robot_manager.plan_gripper(
-                            action.target_gripper_pos, type='percent'
-                        )
-                else:
-                    control_seq['gripper'] = self._robot_manager.plan_gripper(
-                        action.target_gripper_pos, type='qpos'
-                    )
-                if control_seq['gripper']['status'] == 'Fail':
-                    self.logger.error(f'Gripper motion planning failed on action {idx}: {action.__str__()}')
-                    self.plan_success = False
-                    return False
-            
-            self.take_dense_action(control_seq, is_save)
+            control_seq = self._plan_control_seq(
+                action, idx, constraint_pose, time_dilation_factor,
+                gripper_depth_threshold, rm)
+            if control_seq is None:
+                return False
+            self.take_dense_action(control_seq, is_save, rm=rm, tm=tm)
             if delay:
                 self.delay(10, is_save)
         self._update_render()
+        return True
+
+    def move_dual(
+        self,
+        actions_a: list[Action],
+        actions_b: list[Action],
+        tag:str = 'move_dual',
+        is_save: bool = True,
+        delay: bool = True,
+        constraint_pose = None,
+        time_dilation_factor = None,
+    ):
+        """两臂同时运动(仅非自适应 arm/gripper 轨迹)。先各自规划再逐步同帧下发。
+        自适应抓取请用单臂 move(arm=...) 顺序做(两个自适应生成器无法与不同长轨迹同步)。
+        actions_a / actions_b 一一配对(按下标), 某臂的列表可短/可空, 短的到末端后保持。"""
+        if self.plan_success is False:
+            return False
+        self.atom_id += 1
+        self.atom_tag = tag
+        rm_a, _ = self._arm('a')
+        rm_b, _ = self._arm('b')
+
+        n = max(len(actions_a), len(actions_b))
+        for idx in range(n):
+            seq_a = seq_b = None
+            if idx < len(actions_a):
+                seq_a = self._plan_control_seq(
+                    actions_a[idx], idx, constraint_pose, time_dilation_factor, None, rm_a)
+                if seq_a is None:
+                    return False
+            if idx < len(actions_b):
+                seq_b = self._plan_control_seq(
+                    actions_b[idx], idx, constraint_pose, time_dilation_factor, None, rm_b)
+                if seq_b is None:
+                    return False
+            self._take_dense_action_dual(seq_a, rm_a, seq_b, rm_b, is_save)
+            if delay:
+                self.delay(10, is_save)
+        self._update_render()
+        return True
+
+    def _take_dense_action_dual(self, seq_a, rm_a, seq_b, rm_b, is_save:bool=True):
+        """同帧驱动两臂(非自适应)。短的轨迹到末端后保持末位姿。"""
+        def steps(seq, key):
+            s = seq[key] if seq is not None else None
+            return s, (s['num_steps'] if s is not None else 0)
+        arm_a, na = steps(seq_a, 'arm'); grp_a, nga = steps(seq_a, 'gripper')
+        arm_b, nb = steps(seq_b, 'arm'); grp_b, ngb = steps(seq_b, 'gripper')
+        total = max(na, nga, nb, ngb)
+        for idx in range(total):
+            if arm_a is not None and idx < na:
+                rm_a.set_arm(arm_a['position'][idx], arm_a['velocity'][idx])
+            if grp_a is not None and grp_a['num_steps'] > 0 and idx < nga:
+                rm_a.set_gripper(grp_a['position'][idx], grp_a['velocity'][idx])
+            if arm_b is not None and idx < nb:
+                rm_b.set_arm(arm_b['position'][idx], arm_b['velocity'][idx])
+            if grp_b is not None and grp_b['num_steps'] > 0 and idx < ngb:
+                rm_b.set_gripper(grp_b['position'][idx], grp_b['velocity'][idx])
+            self._step(is_save)
         return True
  
     def delay(self, steps=20, is_save:bool=False, force:bool=False):
@@ -768,11 +913,13 @@ class BaseTask(UipcRLEnv):
         self._update_render()
         return True
  
-    def take_dense_action(self, control_seq, is_save:bool=True):
+    def take_dense_action(self, control_seq, is_save:bool=True, rm=None, tm=None):
         """
         control_seq:
             arm, gripper
+        rm/tm: 指定臂的 robot/tactile manager(默认主臂)。
         """
+        rm = rm or self._robot_manager
         arm_seq, gripper_seq = (
             control_seq['arm'],
             control_seq['gripper'],
@@ -784,30 +931,30 @@ class BaseTask(UipcRLEnv):
         if gripper_steps == -1: # adaptive grasp
             idx, gripper_active = 0, True
             gripper_planner = self.adaptive_set_gripper(
-                gripper_seq['target'], gripper_seq['threshold'])
+                gripper_seq['target'], gripper_seq['threshold'], rm=rm, tm=tm)
             while True:
                 if idx >= arm_steps and not gripper_active:
                     break
                 if arm_seq is not None and idx < arm_steps:
-                    self._robot_manager.set_arm(
+                    rm.set_arm(
                         arm_seq['position'][idx],
                         arm_seq['velocity'][idx]
                     )
                 if gripper_active:
                     pos, vel, gripper_active = next(gripper_planner)
-                    self._robot_manager.set_gripper(pos, vel)
+                    rm.set_gripper(pos, vel)
                 self._step(is_save)
                 idx += 1
         else:
             max_control_len = max(arm_steps, gripper_steps)
             for idx in range(max_control_len):
                 if arm_seq is not None and idx < arm_steps:
-                    self._robot_manager.set_arm(
+                    rm.set_arm(
                         arm_seq['position'][idx],
                         arm_seq['velocity'][idx]
                     )
                 if gripper_steps is not None and idx < gripper_steps:
-                    self._robot_manager.set_gripper(
+                    rm.set_gripper(
                         gripper_seq['position'][idx],
                         gripper_seq['velocity'][idx]
                     )
@@ -877,20 +1024,22 @@ class BaseTask(UipcRLEnv):
 
         return exec_success, self.eval_success
 
-    def adaptive_set_gripper(self, qpos, depth_threshold:float=None):
+    def adaptive_set_gripper(self, qpos, depth_threshold:float=None, rm=None, tm=None):
+        rm = rm or self._robot_manager
+        tm = tm or self._tactile_manager
         max_steps = 1000
         default_step, contact_step = 0.0005, 0.00005
-        last_qpos = self._robot_manager.get_gripper_qpos()
-        max_depth = self.cfg.robot.tactile_far_plane \
-            * torch.ones_like(self._tactile_manager.get_min_depth()) # mm
+        last_qpos = rm.get_gripper_qpos()
+        max_depth = rm.cfg.tactile_far_plane \
+            * torch.ones_like(tm.get_min_depth()) # mm
         if depth_threshold is not None:
             depth_threshold = depth_threshold * torch.ones_like(max_depth)
-        direct = 'open' if self._robot_manager.get_gripper_qpos() < qpos else 'close'
+        direct = 'open' if rm.get_gripper_qpos() < qpos else 'close'
 
         step_size = contact_step if direct == 'open' else -default_step
         for i in range(max_steps):
-            current_qpos = self._robot_manager.get_gripper_qpos()
-            tactile_depth = self._tactile_manager.get_min_depth()
+            current_qpos = rm.get_gripper_qpos()
+            tactile_depth = tm.get_min_depth()
 
             if direct == 'close':
                 if torch.allclose(max_depth, tactile_depth, atol=1e-5):
@@ -925,12 +1074,12 @@ class BaseTask(UipcRLEnv):
                 target_qpos = qpos
             else:
                 target_qpos = current_qpos + step_size
-            position = torch.tensor([target_qpos, target_qpos], device=self._robot_manager.device)
+            position = torch.tensor([target_qpos, target_qpos], device=rm.device)
             velocity = (position - current_qpos)/self.cfg.sim.dt
             last_qpos = current_qpos
             yield position, velocity, True
 
-        final_position = torch.tensor([last_qpos, last_qpos], device=self._robot_manager.device)
+        final_position = torch.tensor([last_qpos, last_qpos], device=rm.device)
         yield final_position, torch.zeros_like(final_position), False
 
     def gravity_rotate(self, actor:Actor, target_vec, target_axis=[0, 0, 1], is_save=True):

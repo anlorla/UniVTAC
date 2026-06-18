@@ -356,11 +356,12 @@ class VisualTactileSensor:
         return torch.min(self.sensor.data.output['height_map']).item()
 
 class TactileManager:
-    def __init__(self, cfg_list: list[TactileCfg], task:'BaseTask'):
+    def __init__(self, cfg_list: list[TactileCfg], task:'BaseTask', robot_manager=None):
         self.task = task
         self.scene = task.scene
         self.uipc_sim = task.uipc_sim
-        self.robot = task._robot_manager.robot
+        # 双臂时可绑定到指定臂; 默认主臂(向后兼容)
+        self.robot = (robot_manager or task._robot_manager).robot
         
         self.tactiles = {
             cfg.name: VisualTactileSensor(

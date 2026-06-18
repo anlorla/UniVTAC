@@ -23,16 +23,20 @@ if TYPE_CHECKING:
     from .._base_task import BaseTask
 
 class RobotManager:
-    def __init__(self, robot_cfg:RobotCfg, task:'BaseTask', planner_time_dilation_factor:float=1.0):
+    def __init__(self, robot_cfg:RobotCfg, task:'BaseTask', planner_time_dilation_factor:float=1.0,
+                 name:str='robot'):
         self.cfg = robot_cfg
         self.task = task
+        self.name = name
         self.device = task.device
+        # 该臂规划器需忽略的 actor(在手中的随动件 / 要穿过的目标), 双臂时两臂忽略集不同。
+        self.ignore_actors:set = set()
         self.sensor_type = task.cfg.tactile_sensor_type
         if self.sensor_type in ['gsmini', 'gf225', 'xsensews']: # franka panda
             self.robot_type = 'franka_panda'
 
         self.robot = Articulation(self.cfg.robot)
-        self.task.scene.articulations['robot'] = self.robot
+        self.task.scene.articulations[name] = self.robot
         self.planner_time_dilation_factor = planner_time_dilation_factor
 
         self.gripper_max_qpos = 0.039
@@ -78,7 +82,11 @@ class RobotManager:
         self.origin_pose = self.get_gripper_center_pose()
         self._all_ids = torch.cat([self._arm_ids, self._gripper_ids], dim=0)
  
-        self.root_pose = Pose.from_list(self.robot.data.root_link_pos_w[0])
+        # 基座位姿(含朝向): 第二条臂基座有 yaw, 不能只取位置否则规划坐标系朝向错。
+        self.root_pose = Pose(
+            self.robot.data.root_link_pos_w[0].cpu().numpy(),
+            self.robot.data.root_link_quat_w[0].cpu().numpy(),
+        )
         planner_cfg = CuroboPlannerCfg(
             dt=self.task.cfg.sim.dt,
             all_joints_name=self.robot.joint_names,
@@ -91,6 +99,8 @@ class RobotManager:
             cfg=planner_cfg,
             robot_origin_pose=self.root_pose,
         )
+        # 让规划器能读到本臂的忽略集(在手件/穿过目标)
+        self.planner.owning_manager = self
     
     def ee_to_gripper_center(self, ee_pose:Pose) -> Pose:
         """将夹爪中心位姿转换为末端执行器目标位姿"""
@@ -108,16 +118,17 @@ class RobotManager:
         return actor.get_pose().rebase(self.get_gripper_center_pose())
     
     def get_ee_pose(self, env_ids:slice=None) -> Pose:
-        """获取当前末端执行器目标位姿（target_pose）"""
+        """获取当前末端执行器**世界系**位姿。
+
+        plan_arm 接收的就是世界系目标(内部再 rebase 到本臂基座系), 故这里必须返回世界系,
+        否则 move_by_displacement/place_actor 等"取当前 ee 再加位移"对非原点基座(如双臂)会错。
+        单臂在原点+单位朝向时, 世界系==基座系, 与旧实现完全一致(向后兼容)。
+        """
         if env_ids is None:
             env_ids = [0]
         ee_pos_w = self.robot.data.body_link_pos_w[:, self._body_idx]
         ee_quat_w = self.robot.data.body_link_quat_w[:, self._body_idx]
-        root_pos_w = self.robot.data.root_link_pos_w
-        root_quat_w = self.robot.data.root_link_quat_w
-        ee_pose_b, ee_quat_b = math_utils.subtract_frame_transforms(
-            root_pos_w, root_quat_w, ee_pos_w, ee_quat_w)
-        return Pose(ee_pose_b[0].cpu().numpy(), ee_quat_b[0].cpu().numpy())
+        return Pose(ee_pos_w[0].cpu().numpy(), ee_quat_w[0].cpu().numpy())
 
     def get_qpos(self):
         return self.robot.data.joint_pos.clone().cpu()
@@ -148,6 +159,12 @@ class RobotManager:
                 self.robot._data.joint_pos_target,
                 self.robot._ALL_INDICES
             )
+
+    def reassert(self):
+        """把本臂每个 dof 瞬移到当前关节目标(force-teleport)。
+        双臂时被动臂(没在主动运动的那条)每步靠它冻结在抓取姿态, 维持夹持(否则只剩 PD 会松爪掉物)。"""
+        self.robot.root_physx_view.set_dof_positions(
+            self.robot._data.joint_pos_target, self.robot._ALL_INDICES)
 
     def plan_arm(self, target_pose:Pose, constraint_pose=None, pre_dis=None, time_dilation_factor=None):
         result:MotionGenResult = self.planner.plan_path(

@@ -85,19 +85,28 @@ class CuroboPlanner:
         self.motion_gen.reset()
 
     def get_curr_world_cfg(self):
-        # obstacles = self.usd_helper.get_obstacles_from_stage(
-        #     only_paths=["/World"],
-        #     reference_prim_path=self.robot_prime_path,
-        #     ignore_substring=['/World/defaultGroundPlane', '/World/visualize/*', self.robot_prime_path]
-        # ).get_collision_check_world()
-        obstacles = {
-            "cuboid": {
-                "table": {
-                    "dims": [0.5, 0, 0],
-                    "pose": [-1000, 0.0, 0.0, 1, 0, 0, 0],
-                },
-            }
-        }
+        # 障碍物参考系 = 本臂自己的基座(env_0 实例)。由 robot_prime_path 推出,
+        # 不再写死, 这样第二条臂(/Robot_b)也能用各自基座系取障碍。
+        ref_prim_path = self.robot_prime_path.replace('env_.*', 'env_0')
+        obstacles = self.usd_helper.get_obstacles_from_stage(
+            reference_prim_path=ref_prim_path,
+            only_paths=[
+                '/World/envs/env_0/ground_plate'
+            ],
+        ).get_collision_check_world()
+
+        # 该忽略的 actor(随夹爪一起动的在手件, 或本臂要穿过的目标), 不作为静态障碍物,
+        # 否则长 peg 盖住夹爪/小孔被当实心 -> 任何运动都判碰撞 -> 规划失败。
+        # 双臂时各臂忽略集不同(owning_manager.ignore_actors), 与任务级集合并集(单臂向后兼容)。
+        ignore = set(getattr(self.task, 'planner_ignore_actors', None) or set())
+        owning = getattr(self, 'owning_manager', None)
+        if owning is not None:
+            ignore |= set(getattr(owning, 'ignore_actors', None) or set())
+        for name, actor in self.task._actor_manager.actors.items():
+            if name in ignore:
+                continue
+            mesh = Mesh.from_pointcloud(actor.vertices, pitch=0.005, name=name)
+            obstacles.add_obstacle(mesh)
         return obstacles
  
     def update_world(self):

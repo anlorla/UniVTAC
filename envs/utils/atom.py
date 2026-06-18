@@ -79,9 +79,10 @@ class Action:
 
 
 class Atom:
-    def __init__(self, task: 'BaseTask'):
+    def __init__(self, task: 'BaseTask', robot_manager=None):
         self.task = task
-        self.robot = self.task._robot_manager
+        # 双臂时可绑定到指定臂; 默认主臂(向后兼容)
+        self.robot = robot_manager or self.task._robot_manager
 
     def get_grasp_pose(
         self,
