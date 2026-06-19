@@ -5,6 +5,7 @@ from curobo.types.robot import JointState
 from curobo.util.usd_helper import UsdHelper
 from curobo.types.math import Pose as CuroboPose
 from curobo.geom.sdf.world import CollisionCheckerType
+from curobo.geom.types import Mesh
 from curobo.wrap.reacher.motion_gen import (
     MotionGen,
     MotionGenConfig,
@@ -76,7 +77,11 @@ class CuroboPlanner:
             rotation_threshold=0.01,
             high_precision=True,
             collision_checker_type=CollisionCheckerType.MESH,
-            collision_activation_distance=0.4
+            # 原值 0.4m(40cm)是 collision cost 的软激活距离, 远超 cuRobo 默认 0.025m。
+            # 桌面(ground_plate)被纳入障碍后, 抓取目标(离桌面~13cm)整个落在 40cm 软碰撞带内,
+            # 任何接近都被判为碰撞 -> trajopt 不收敛(pos_err~0.9) -> DT_EXCEPTION/规划失败。
+            # 抓取本就需要贴近物体, 必须用小激活距离; 0.025m 为 cuRobo 默认且实测可正常抓取。
+            collision_activation_distance=0.025,
         )
         self.motion_gen = MotionGen(motion_gen_config)
         self.motion_gen.warmup()

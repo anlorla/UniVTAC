@@ -50,9 +50,12 @@ class Task(BaseTask):
         cfg.sim.physics_material.dynamic_friction = 2.5
         cfg.sim.physics_material.static_friction = 2.5
         cfg.uipc_sim.contact.default_friction_ratio = 2.5
-        super().__init__(cfg, mode, render_mode, **kwargs)
-        # USB 全程握在手里, 让规划器把它当随动件而非静态障碍物(否则长 peg 盖住夹爪->规划必失败)
+        # USB 全程握在手里, 让规划器把它当随动件而非静态障碍物(否则长 peg 盖住夹爪->规划必失败)。
+        # 必须在 super().__init__() 之前设置: 规划器(及其冻结的碰撞世界)在 super().__init__()
+        # 内创建, 那时若 ignore 还没设, USB 初始位姿(0.45,0,0.25, 正好在 home 夹爪处)会被当静态障碍
+        # -> 起始状态即判定 world collision -> action 0 规划失败。
         self.planner_ignore_actors = {'usb'}
+        super().__init__(cfg, mode, render_mode, **kwargs)
 
     # ---------------------------------------------------------------- actors
     def create_actors(self):
