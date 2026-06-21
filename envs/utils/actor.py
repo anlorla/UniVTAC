@@ -82,12 +82,12 @@ class Actor(UipcObject):
         return ret
 
     @classmethod
-    def from_usd_file(cls, task: 'BaseTask', name:str, asset_path, pose:Pose, constitution_cfg=None, density=1e3):
+    def from_usd_file(cls, task: 'BaseTask', name:str, asset_path, pose:Pose, constitution_cfg=None, density=1e3, scale=None):
         asset_path = Path(asset_path)
         if not asset_path.is_absolute():
             asset_path = OBJECTS_ROOT / asset_path
         asset_path = str(asset_path.absolute())
-        
+
         cfg = ActorCfg(
             name=name,
             asset=asset_path,
@@ -96,6 +96,7 @@ class Actor(UipcObject):
             spawn=sim_utils.UsdFileCfg(
                 usd_path=asset_path,
                 mass_props=sim_utils.MassPropertiesCfg(density=density),
+                **({} if scale is None else {'scale': tuple(scale)}),
             ),
             constitution_cfg=UipcObjectCfg.AffineBodyConstitutionCfg() \
                 if constitution_cfg is None else constitution_cfg,
@@ -254,10 +255,10 @@ class ActorManager:
         self.task = task
         self.actors: dict[str, Actor] = {}
 
-    def add_from_usd_file(self, name:str, asset_path:str, pose:Pose, constitution_cfg=None, density=1e3):
+    def add_from_usd_file(self, name:str, asset_path:str, pose:Pose, constitution_cfg=None, density=1e3, scale=None):
         actor = Actor.from_usd_file(
             self.task, name, asset_path, pose,
-            constitution_cfg=constitution_cfg, density=density
+            constitution_cfg=constitution_cfg, density=density, scale=scale
         )
         self.actors[actor.cfg.name] = actor
         return actor
