@@ -187,6 +187,12 @@ class RobotManager:
         else:
             return {'status': 'Fail', 'num_steps': 0, 'position': None, 'velocity': None}
 
+    def solve_ik(self, target_pose:Pose):
+        # direct single-shot IK (no curobo trajectory) -> joint positions or None
+        return self.planner.solve_ik(
+            target_pose, self.root_pose,
+            curr_joint_pos=self.robot.data.joint_pos[0, :self.robot.num_joints-2])
+
     def gripper_percent2qpos(self, percentage:float):
         gripper_range = [0, self.gripper_max_qpos]
         target_pos = gripper_range[0] + (gripper_range[1] - gripper_range[0]) * percentage

@@ -984,27 +984,38 @@ class BaseTask(UipcRLEnv):
                 Action(action='all', target_pose=target_pose, target_gripper_pos=target_gripper_pos)
             ], delay=False)
         elif action_type == 'ee_ik':
-            # EE->IK->joint: execute SUBSAMPLED curobo trajectory (smooth, avoids teleport-jump/retreat)
             target_pose = Pose(p=action[:3], q=action[3:7])
-            arm_plan = self._robot_manager.plan_arm(target_pose)
-            if arm_plan['status'] == 'Success':
-                _pos = arm_plan['position']; _vel = arm_plan['velocity']
-                _n = int(_pos.shape[0])
-                _k = int(os.environ.get('UNIVTAC_IK_STEPS', '6'))
-                if _k <= 1:
-                    _idxs = [_n - 1]
-                elif _n <= _k:
-                    _idxs = list(range(_n))
+            if os.environ.get('UNIVTAC_DIRECT_IK', '1') != '0':
+                # DIRECT IK: single-shot solve + set joints (no curobo trajectory planning).
+                # curobo plan_arm chokes the GPU (96% util -> ~0.01 FPS) on hard targets and often fails.
+                ik = self._robot_manager.solve_ik(target_pose)
+                if ik['status'] == 'Success':
+                    self._robot_manager.set_arm(ik['position'], force=force)
                 else:
-                    _idxs = sorted(set(np.linspace(0, _n - 1, _k).astype(int).tolist()))
-                for _i in _idxs:
-                    self._robot_manager.set_arm(_pos[_i], _vel[_i], force=force)
-                    self._robot_manager.set_gripper(action[-1], force=force)
-                    self._step()
-            else:
-                self.logger.warning('ee_ik plan failed, holding arm')
+                    self.logger.warning('direct IK failed, holding arm')
                 self._robot_manager.set_gripper(action[-1], force=force)
                 self._step()
+            else:
+                # legacy: EE->IK->joint via SUBSAMPLED curobo trajectory (smooth, slow)
+                arm_plan = self._robot_manager.plan_arm(target_pose)
+                if arm_plan['status'] == 'Success':
+                    _pos = arm_plan['position']; _vel = arm_plan['velocity']
+                    _n = int(_pos.shape[0])
+                    _k = int(os.environ.get('UNIVTAC_IK_STEPS', '6'))
+                    if _k <= 1:
+                        _idxs = [_n - 1]
+                    elif _n <= _k:
+                        _idxs = list(range(_n))
+                    else:
+                        _idxs = sorted(set(np.linspace(0, _n - 1, _k).astype(int).tolist()))
+                    for _i in _idxs:
+                        self._robot_manager.set_arm(_pos[_i], _vel[_i], force=force)
+                        self._robot_manager.set_gripper(action[-1], force=force)
+                        self._step()
+                else:
+                    self.logger.warning('ee_ik plan failed, holding arm')
+                    self._robot_manager.set_gripper(action[-1], force=force)
+                    self._step()
         elif action_type == 'delta_ee':
             ee_pose = self._robot_manager.get_ee_pose()
             ee_next_pose = ee_pose.add_bias(action[:3], coord='world')\

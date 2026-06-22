@@ -174,3 +174,20 @@ class CuroboPlanner:
 
         return self.motion_gen.plan_single(
             start_joint_states, goal_pose_of_ee, plan_config)
+
+    def solve_ik(self, target_ee_pose, real_robot_pose, curr_joint_pos=None):
+        # direct single-shot IK (no trajectory planning) -- fast, avoids curobo plan_single GPU contention
+        target_pose = calculate_target_pose(
+            real_robot_pose, self.robot_origin_pose, target_ee_pose)
+        target_pose = target_pose.rebase(to_coord=self.robot_origin_pose).add_bias(
+            self.frame_bias, coord='world', clone=False)
+        goal_pose_of_ee = CuroboPose.from_list(target_pose.tolist())
+        retract = None
+        if curr_joint_pos is not None:
+            joint_indices = np.array([
+                self.all_joints.index(name) for name in self.active_joints_name if name in self.all_joints])
+            retract = curr_joint_pos[joint_indices].reshape(1, -1)
+        result = self.motion_gen.solve_ik(goal_pose_of_ee, retract_config=retract)
+        if bool(result.success.view(-1)[0].item()):
+            return {'status': 'Success', 'position': result.js_solution.position.detach().reshape(-1)}
+        return {'status': 'Fail', 'position': None}
