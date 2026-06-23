@@ -10,9 +10,24 @@ Usage (pxr lives in isaacsim extscache):
     python scripts/asset_tools/build_cup_usd.py <in.obj> <tet.npz> <out.usd>
 """
 import sys, numpy as np, trimesh
-from pxr import Usd, UsdGeom, UsdPhysics, Sdf, Vt, Gf
+from pxr import Usd, UsdGeom, UsdPhysics, UsdShade, Sdf, Vt, Gf
 
 obj_path, npz_path, out_path = sys.argv[1], sys.argv[2], sys.argv[3]
+
+
+def bind_material(stage, root_path, mesh_prim, color, name="Surf"):
+    """Bind a UsdPreviewSurface so the asset renders lit/colored. The UIPC loader replaces the
+    mesh geometry with the tet surface at load time but does NOT touch the material binding,
+    so this binding survives and gives the in-sim asset its color (otherwise: flat dark gray)."""
+    UsdGeom.Scope.Define(stage, f"{root_path}/Looks")
+    mat = UsdShade.Material.Define(stage, f"{root_path}/Looks/{name}")
+    sh = UsdShade.Shader.Define(stage, f"{root_path}/Looks/{name}/Shader")
+    sh.CreateIdAttr("UsdPreviewSurface")
+    sh.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(*color))
+    sh.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(0.7)
+    sh.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set(0.0)
+    mat.CreateSurfaceOutput().ConnectToSource(sh.ConnectableAPI(), "surface")
+    UsdShade.MaterialBindingAPI.Apply(mesh_prim).Bind(mat)
 
 m = trimesh.load(obj_path, process=False)
 if isinstance(m, trimesh.Scene):
@@ -53,6 +68,9 @@ def v3(n, a): prim.CreateAttribute(n, Sdf.ValueTypeNames.Float3Array).Set(Vt.Vec
 def ui(n, a): prim.CreateAttribute(n, Sdf.ValueTypeNames.UIntArray).Set(Vt.UIntArray.FromNumpy(a.reshape(-1).astype(np.uint32)))
 v3("tet_points", d["tet_points"]); ui("tet_indices", d["tet_indices"])
 v3("tet_surf_points", d["surf_points"]); ui("tet_surf_indices", d["surf_indices"])
+
+# material so the cup renders as a lit cream paper cup (not flat dark gray)
+bind_material(stage, "/CUP", prim, (0.93, 0.90, 0.84))
 
 stage.GetRootLayer().Save()
 print(f"[build_cup_usd] {out_path}: {len(V)} verts / {len(F)} faces / {len(d['tet_indices'])//4} tets, self-contained")

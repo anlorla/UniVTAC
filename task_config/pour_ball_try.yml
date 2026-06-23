@@ -1,0 +1,18 @@
+# Pour-ball 试录(try shot): 只跑 1 个 seed, 无论成功/失败都保存视频, 然后停止。
+# 视频输出: data/pour_ball/pour_ball_try/video/0_<result>.mp4  (<result>=success|fail|error)
+save_dir: ./data
+decimation: 1
+save_frequency: 2
+video_frequency: 2        # >0 开启 MP4 录制(每 2 步写一帧)
+render_frequency: 0       # 0 = headless 纯录制(不开 GUI 窗口)
+random_texture: false
+use_seed: true
+episode_num: 1            # 收满 1 条成功即停 —— 但配合 max_seed=0, 不管成败都只跑 seed 0 一次
+start_seed: 0
+max_seed: 0               # seed 上限 0 -> 跑完 seed 0(成或败)后 seed=1>0 即退出
+sensor_type: gsmini
+observations:
+  camera: ['rgb']
+  tactile: ['rgb', 'rgb_marker', 'marker', 'depth', 'pose']
+  embodiment: ['joint', 'ee']
+  actor: true

@@ -21,9 +21,13 @@ UniVTAC currently includes the following manipulation tasks, all featuring tacti
 | **Insert HDMI** | `insert_HDMI` | Insert an HDMI connector into a port |
 | **Insert Hole** | `insert_hole` | Precision peg-in-hole insertion |
 | **Insert Tube** | `insert_tube` | Insert a tube into a fixture |
+| **Insert USB** | `insert_USB` | Peg-in-hole insertion of a USB connector into a slot |
 | **Pull Out Key** | `pull_out_key` | Extract a key from a lock |
 | **Put Bottle in Shelf** | `put_bottle_in_shelf` | Place a bottle onto a shelf |
 | **Grasp & Classify** | `grasp_classify` | Grasp an object and classify it by tactile feedback |
+| **Grasp Chip** | `grasp_chip` | Grasp a fragile chip without crushing it (tactile force limit) |
+| **Dual-Arm Screw & Sleeve** | `dual_screw_sleeve` | Dual-arm assembly: one arm holds the sleeve, the other inserts a screw into it |
+| **Dual-Arm Cup Stack** | `dual_cup_stack` | Dual-arm nesting: one arm holds the bottom cup, the other stacks a second cup into it |
 
 To build more tasks, refer to the [Task Creation Guide](./docs/TaskCreation.md) for instructions on how to define new manipulation tasks within the UniVTAC framework.
 
@@ -32,6 +36,71 @@ To build more tasks, refer to the [Task Creation Guide](./docs/TaskCreation.md) 
 See the [Data Collection Guide](./docs/Collection.md) for instructions on how to run the automated data collection pipeline, configure task-specific parameters, and understand the output data structure.
 
 Dataset containing 100 episodes per task can be downloaded from [HuggingFace](https://huggingface.co/datasets/byml/UniVTAC), [Modelscope](https://modelscope.cn/datasets/byml2024/UniVTAC) or by running the script in `data/download.sh`.
+
+## Visualizing Tasks & Saving Videos
+
+Every task runs through the same entry point, `scripts/collect_data.py`, driven by a YAML config in `task_config/`. The config controls whether a video is recorded and whether an interactive Isaac Sim window opens.
+
+```bash
+python scripts/collect_data.py <task_name> <task_config> [--gpu <id>]
+# e.g.
+python scripts/collect_data.py insert_USB demo
+```
+
+- `<task_name>` — a module under `envs/` (e.g. `insert_USB`, `lift_can`, `dual_screw_sleeve`).
+- `<task_config>` — a YAML under `task_config/` (extension optional, so `demo` resolves to `task_config/demo.yml`).
+
+### Saving a task's video
+
+Run the task with a config whose `video_frequency > 0`. The MP4 is written to:
+
+```
+data/<task_name>/<task_config>/video/<seed>_<result>.mp4
+```
+
+where `<result>` is `success`, `fail`, or `error` — so the clip is saved **no matter the outcome**. Each frame tiles the head + wrist camera views alongside the tactile-pad images.
+
+Config keys that control recording (see `task_config/demo.yml` for a full example):
+
+| Key | Meaning |
+|---|---|
+| `video_frequency` | `>0` enables MP4 recording (writes one frame every N steps); `0` disables it |
+| `render_frequency` | `0` = headless (no window, pure recording); `1` = also open a live Isaac Sim window |
+| `save_frequency` | cadence for saving HDF5 observations |
+| `episode_num` | number of **successful** episodes to collect before stopping |
+| `start_seed` / `max_seed` | first seed / seed cap (CLI `--start_seed` / `--max_seed` override the YAML) |
+| `observations` | which `camera` / `tactile` / `embodiment` / `actor` signals to log |
+
+To record a single **try shot** — run one seed exactly once at the highest frequency (a frame every step) and save the video whether it succeeds or fails — use the ready-made `task_config/record_one.yml` (`episode_num: 1`, `start_seed: 0`, `max_seed: 0`, `video_frequency: 1`):
+
+```bash
+python scripts/collect_data.py <task_name> record_one
+# -> data/<task_name>/record_one/video/0_<result>.mp4
+```
+
+### Visualizing in the Isaac Sim GUI
+
+All three options below open the live Isaac Sim window and therefore require a display (`DISPLAY` set):
+
+1. **Watch while collecting** — set `render_frequency: 1` in the config (see `task_config/gui.yml`). This opens an Isaac Sim window with live rendering as the scripted demo runs, and still records the video:
+   ```bash
+   python scripts/collect_data.py insert_USB gui
+   ```
+2. **Inspect a task scene** (robot + objects, no scripted motion) — handy while building or placing a new task:
+   ```bash
+   python scripts/view_task.py <task_name> [--seed <id>]   # e.g. python scripts/view_task.py insert_USB
+   ```
+3. **Inspect a single asset** (`.usd`) on a ground plane:
+   ```bash
+   python scripts/view_usd.py assets/objects/USB.usd
+   ```
+
+> **Multi-GPU / headless note:** Isaac Sim's renderer must run on an RTX NVIDIA GPU. On machines whose X display defaults to a non-NVIDIA GPU (e.g. an Intel iGPU), force the NVIDIA Vulkan driver before launching — this is also required for headless camera/video recording:
+> ```bash
+> VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json \
+>   __NV_PRIME_RENDER_OFFLOAD=1 __GLX_VENDOR_LIBRARY_NAME=nvidia DISPLAY=:1 \
+>   python scripts/collect_data.py insert_USB gui
+> ```
 
 ## Train & Eval Policies
 

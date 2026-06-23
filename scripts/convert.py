@@ -482,8 +482,10 @@ def convert_mesh(input_path:Path, output_path:Path,
         usd_dir=str(output_path.parent),
         usd_file_name=output_path.name,
         make_instanceable=make_instanceable,
-        collision_approximation=collision_approximation,
     )
+    # Installed Isaac Lab's MeshConverterCfg no longer takes collision_approximation
+    # as a ctor kwarg; the custom MeshConverter above reads it off the cfg directly.
+    mesh_converter_cfg.collision_approximation = collision_approximation
     mesh_converter = MeshConverter(mesh_converter_cfg)
     return Path(mesh_converter.usd_path)
 

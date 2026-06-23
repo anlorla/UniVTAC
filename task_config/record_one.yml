@@ -1,0 +1,20 @@
+# Record ONE episode / ONE video at the highest frequency (every step).
+# Runs seed 0 exactly once and saves the clip whether it succeeds or fails:
+#   python scripts/collect_data.py <task_name> record_one
+#   -> data/<task_name>/record_one/video/0_<result>.mp4   (<result> = success|fail|error)
+save_dir: ./data
+decimation: 1
+save_frequency: 1         # save an HDF5 observation every step (highest frequency)
+video_frequency: 1        # write a video frame every step (highest frequency)
+render_frequency: 0       # 0 = headless pure recording; set to 1 to also open an Isaac Sim window
+random_texture: false
+use_seed: true
+episode_num: 1            # collect just 1 (successful) episode...
+start_seed: 0
+max_seed: 0               # ...and cap at seed 0 -> seed 0 runs exactly once, success or fail
+sensor_type: gsmini
+observations:
+  camera: ['rgb']
+  tactile: ['rgb', 'rgb_marker', 'marker', 'depth', 'pose']
+  embodiment: ['joint', 'ee']
+  actor: true
