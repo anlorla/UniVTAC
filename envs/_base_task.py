@@ -991,6 +991,15 @@ class BaseTask(UipcRLEnv):
                 ik = self._robot_manager.solve_ik(target_pose)
                 if ik['status'] == 'Success':
                     self._robot_manager.set_arm(ik['position'], force=force)
+                    if os.environ.get('UNIVTAC_JOINT_DUMP', '0') == '1':
+                        # diagnostic: append solved joints per step to inspect IK
+                        # branch jitter (pairs with UNIVTAC_IK_SEEDCFG).
+                        try:
+                            os.makedirs('/tmp/jointdump', exist_ok=True)
+                            with open('/tmp/jointdump/%d.txt' % os.getpid(), 'a') as _jf:
+                                _jf.write(' '.join('%.5f' % _v for _v in ik['position'].tolist()) + '\n')
+                        except Exception:
+                            pass
                 else:
                     self.logger.warning('direct IK failed, holding arm')
                 self._robot_manager.set_gripper(action[-1], force=force)

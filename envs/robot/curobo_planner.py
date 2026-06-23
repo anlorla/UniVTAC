@@ -1,4 +1,5 @@
 from curobo.geom.transform import pose_multiply
+import os
 import numpy as np
 import transforms3d as t3d
 from curobo.types.robot import JointState
@@ -187,7 +188,15 @@ class CuroboPlanner:
             joint_indices = np.array([
                 self.all_joints.index(name) for name in self.active_joints_name if name in self.all_joints])
             retract = curr_joint_pos[joint_indices].reshape(1, -1)
-        result = self.motion_gen.solve_ik(goal_pose_of_ee, retract_config=retract)
+        # UNIVTAC_IK_SEEDCFG=1: seed IK from the CURRENT joints (single seed) so the
+        # solver converges to the nearest solution branch, avoiding null-space wrist
+        # flips (J5/J7 jumping up to ~2 rad between frames at an identical EE pose).
+        # EE accuracy is unchanged -- this only removes cosmetic joint jitter. Opt-in.
+        seed_config = None
+        if retract is not None and os.environ.get('UNIVTAC_IK_SEEDCFG', '0') == '1':
+            seed_config = retract.view(1, 1, -1)
+        result = self.motion_gen.solve_ik(
+            goal_pose_of_ee, retract_config=retract, seed_config=seed_config)
         if bool(result.success.view(-1)[0].item()):
             return {'status': 'Success', 'position': result.js_solution.position.detach().reshape(-1)}
         return {'status': 'Fail', 'position': None}
