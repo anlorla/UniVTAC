@@ -188,6 +188,11 @@ class BaseTaskCfg(DirectRLEnvCfg):
     robot: RobotCfg = None
     tactile_sensor_type:Literal['gsmini', 'xensews', 'gf225'] = 'gsmini'
 
+    # [PATCH-D] opt-in denser gelpad FEM mesh (option B, gsmini only). Higher-resolution
+    # force field at the cost of a slower UIPC solve. Needs the dense USD generated via
+    # scripts/asset_tools/make_dense_gelpad.py.
+    dense_gelpad: bool = False
+
     # 双臂: 开启后额外建第二条臂(arm B), 其 cfg 放在 robot_b。默认关闭, 单臂任务不受影响。
     dual_arm: bool = False
     robot_b: RobotCfg = None
@@ -267,7 +272,7 @@ class BaseTask(UipcRLEnv):
                 raise ValueError('dual_arm 目前仅支持 tactile_sensor_type="gsmini"')
             cfg.robot, cfg.robot_b = create_franka_gsmini_gripper_dual(data_type=data_type)
         elif cfg.tactile_sensor_type == 'gsmini':
-            cfg.robot = create_franka_gsmini_gripper(data_type=data_type)
+            cfg.robot = create_franka_gsmini_gripper(data_type=data_type, dense_gelpad=cfg.dense_gelpad)
         elif cfg.tactile_sensor_type == 'gf225':
             cfg.robot = create_franka_gf225_gripper(data_type=data_type)
         elif cfg.tactile_sensor_type == 'xensews':

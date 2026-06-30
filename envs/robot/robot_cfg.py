@@ -30,6 +30,7 @@ def create_franka_gsmini_gripper(
     base_pos:tuple[float, float, float]|None=None,
     base_rot:tuple[float, float, float, float]|None=None,
     name_suffix:str="",
+    dense_gelpad:bool=False,
 ):
     """构造 Franka + gsmini 夹爪的 RobotCfg。
 
@@ -57,6 +58,18 @@ def create_franka_gsmini_gripper(
         prim_path=prim_path,
         init_state=ArticulationCfg.InitialStateCfg(**init_kwargs),
     )
+    # [PATCH-D] opt-in denser gelpad FEM mesh (option B). Point the robot USD at the dense
+    # variant (gelpads re-tetrahedralized at edge_length_r=0.05: ~615 nodal / 2276 tets vs
+    # the default 169 / 424); generate it with scripts/asset_tools/make_dense_gelpad.py.
+    if dense_gelpad:
+        from pathlib import Path
+        dense_usd = (Path(__file__).resolve().parents[2] / "third_party/TacEx/source/tacex_assets"
+                     "/tacex_assets/data/Robots/Franka/GelSight_Mini/Gripper/uipc_gelpads_dense_wrist.usd")
+        if not dense_usd.exists():
+            raise FileNotFoundError(
+                f"dense gelpad USD not found: {dense_usd}\n"
+                "generate it once with: python scripts/asset_tools/make_dense_gelpad.py")
+        robot = robot.replace(spawn=robot.spawn.replace(usd_path=str(dense_usd)))
     tactiles = [
         create_tactile_cfg(
             prim_path=f"{prim_path}/gelsight_mini_case_left",
@@ -65,6 +78,7 @@ def create_franka_gsmini_gripper(
             name=f"left_tactile{name_suffix}",
             sensor_type="gsmini",
             data_type=data_type,
+            dense=dense_gelpad,
         ),
         create_tactile_cfg(
             prim_path=f"{prim_path}/gelsight_mini_case_right",
@@ -73,6 +87,7 @@ def create_franka_gsmini_gripper(
             name=f"right_tactile{name_suffix}",
             sensor_type="gsmini",
             data_type=data_type,
+            dense=dense_gelpad,
         )
     ]
     return RobotCfg(

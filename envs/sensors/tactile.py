@@ -47,8 +47,13 @@ def create_gelsight_mini_cfg(
     resolution = (320, 240),
     update_period = 1/120,
     data_type:list[str] = ["camera_depth", "tactile_rgb"],
+    dense: bool = False,
 ):
     from tacex_assets.sensors.gelsight_mini.gsmini_cfg import GelSightMiniCfg
+    # [PATCH-D] dense gelpad mesh: use a sensor_type not in CONSTRAIN_PTS so the marker
+    # simulator extracts surface/constrain vertices dynamically (get_gelpad_info) for the
+    # finer mesh, instead of the cached gsmini indices (which only fit the 169-vertex mesh).
+    sensor_type = 'gsmini_dyn' if dense else 'gsmini'
     sensor_cfg = GelSightMiniCfg(
         prim_path=prim_path,
         sensor_camera_cfg=GelSightMiniCfg.SensorCameraCfg(
@@ -69,7 +74,7 @@ def create_gelsight_mini_cfg(
             marker_radius=6,
             camera_to_surface=0.0283,
             real_size=(0.0266, 0.0209),
-            sensor_type='gsmini',
+            sensor_type=sensor_type,
         ),
         data_types=data_type
     )
@@ -222,6 +227,7 @@ def create_tactile_cfg(
     name: str = "tactile_sensor",
     sensor_type:Literal['gsmini', 'xensews', 'gf225'] = "gsmini",
     data_type:list[str] = ["camera_depth", "tactile_rgb"],
+    dense: bool = False,
 ) -> TactileCfg:
     if sensor_type == "gsmini":
         return create_gelsight_mini_cfg(
@@ -230,6 +236,7 @@ def create_tactile_cfg(
             gelpad_attachment_body_name=gelpad_attachment_body_name,
             name=name,
             data_type=data_type,
+            dense=dense,
         )
     elif sensor_type == "xensews":
         return create_xensews_cfg(
