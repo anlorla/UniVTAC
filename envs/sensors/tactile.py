@@ -437,21 +437,26 @@ class VisualTactileSensor:
     def get_marker_force_image(
         self,
         mode: str = 'interp',
-        base: str = 'rgb',
+        style: str = 'tacff',
+        base: str = None,
         shear_scale: float = None,
         normal_scale: float = None,
     ):
-        """[PATCH-B] Render the marker force field as an image (for inspection / video).
+        """[PATCH-B] Render the marker force field as a TacFF-style image (for inspection / video).
 
-        At each marker (regular lattice position) draws:
-          - a filled dot coloured by the normal force Fz (JET: blue = low, red = high), and
-          - an arrow for the in-plane shear (Fx, Fy).
+        Draws a quiver plot on the regular marker lattice -- one arrow per marker for the in-plane
+        shear (Fx, Fy), coloured by the normal force |Fz|. This mirrors the "tactile force field"
+        visualization in ContactWorld (arXiv:2606.13877): a grid of arrows on a black background,
+        green -> red as contact/normal force grows.
 
         Args:
             mode: force mapping mode, 'interp' or 'scatter' (see get_marker_force).
-            base: background image -- 'rgb' (optical), 'rgb_marker' (optical+markers) or 'white'.
-            shear_scale: pixels per force-unit for the shear arrows. None -> auto (max arrow ~20px).
-            normal_scale: force-unit mapped to the colormap extreme. None -> auto (per-frame max|Fz|).
+            style: 'tacff'   -> green->red arrows on a black background (paper style), or
+                   'overlay' -> white arrows + JET dots on the gel image.
+            base: background override -- 'black', 'white', 'rgb' (optical) or 'rgb_marker'.
+                  Defaults to 'black' for tacff and 'rgb' for overlay.
+            shear_scale: pixels per force-unit for the arrows. None -> auto (max arrow ~20px).
+            normal_scale: |Fz| mapped to the colour extreme. None -> auto (per-frame max|Fz|).
                 Pass a fixed value for frame-to-frame comparable colours.
 
         Returns:
@@ -463,20 +468,27 @@ class VisualTactileSensor:
             self._precompute_marker_force_maps()
 
         H, W = mm.tactile_img_height, mm.tactile_img_width
+        if base is None:
+            base = 'black' if style == 'tacff' else 'rgb'
 
         # --- background image (H, W, 3) uint8 RGB ---
-        if base == 'rgb':
+        if base == 'black':
+            img = np.zeros((H, W, 3), dtype=np.uint8)
+        elif base == 'white':
+            img = np.full((H, W, 3), 255, dtype=np.uint8)
+        elif base == 'rgb':
             img = self.sensor.data.output['tactile_rgb'].squeeze(0).cpu().numpy()
         elif base == 'rgb_marker':
             img = self.sensor.data.output['marker_rgb'].squeeze(0).cpu().numpy()
-        elif base == 'white':
-            img = np.full((H, W, 3), 255, dtype=np.uint8)
         else:
-            raise ValueError(f"Unknown base: {base!r} (use 'rgb', 'rgb_marker' or 'white')")
+            raise ValueError(f"Unknown base: {base!r} (use 'black', 'white', 'rgb' or 'rgb_marker')")
         img = np.ascontiguousarray(img.astype(np.uint8))
 
         # --- force (sensor frame: xy = shear, z = normal), aligned with the marker order ---
         force = self.get_marker_force(mode=mode, in_sensor_frame=True).cpu().numpy()  # (M,3)
+        shear = force[:, :2]
+        smag = np.linalg.norm(shear, axis=1)
+        fz = force[:, 2]
 
         # --- marker uv = project the reference (undeformed) lattice through the camera ---
         ref_pts = (
@@ -485,17 +497,20 @@ class VisualTactileSensor:
         ).sum(1).astype(np.float32)                                   # (M,3) camera frame
         uv = mm.gen_marker_uv(ref_pts)                                # (M,2) pixels
 
-        # --- normal -> colour (JET, RGB) ---
-        fz = force[:, 2]
+        # --- per-marker colour from the normal force magnitude ---
         s_n = (np.abs(fz).max() if normal_scale is None else normal_scale)
         s_n = s_n if s_n > 1e-9 else 1.0
-        cidx = (np.clip(fz / s_n, -1, 1) * 0.5 + 0.5) * 255
-        colors = cv2.applyColorMap(cidx.reshape(-1, 1).astype(np.uint8), cv2.COLORMAP_JET)
-        colors = colors.reshape(-1, 3)[:, ::-1]                       # BGR -> RGB
+        t = np.clip(np.abs(fz) / s_n, 0.0, 1.0)                       # 0 = no normal, 1 = strong
+        if style == 'tacff':
+            # green (low) -> red (high), RGB
+            colors = np.stack([t * 255, (1 - t) * 255, np.zeros_like(t)], axis=1)
+        else:  # overlay: JET colormap dots
+            cidx = (np.clip(fz / s_n, -1, 1) * 0.5 + 0.5) * 255
+            colors = cv2.applyColorMap(cidx.reshape(-1, 1).astype(np.uint8), cv2.COLORMAP_JET)
+            colors = colors.reshape(-1, 3)[:, ::-1]                   # BGR -> RGB
+        colors = colors.astype(np.uint8)
 
         # --- shear auto-scale so the largest arrow is ~20px ---
-        shear = force[:, :2]
-        smag = np.linalg.norm(shear, axis=1)
         if shear_scale is None:
             shear_scale = (20.0 / smag.max()) if smag.max() > 1e-9 else 0.0
 
@@ -504,12 +519,19 @@ class VisualTactileSensor:
             if not (0 <= u < W and 0 <= v < H):
                 continue
             col = tuple(int(c) for c in colors[i])
-            cv2.circle(img, (u, v), 3, col, thickness=-1, lineType=cv2.LINE_AA)
-            if smag[i] > 1e-9:
-                du = int(round(shear[i, 0] * shear_scale))
-                dv = int(round(shear[i, 1] * shear_scale))
-                cv2.arrowedLine(img, (u, v), (u + du, v + dv),
-                                (255, 255, 255), 1, line_type=cv2.LINE_AA, tipLength=0.3)
+            du = int(round(shear[i, 0] * shear_scale))
+            dv = int(round(shear[i, 1] * shear_scale))
+            if style == 'tacff':
+                # small base dot + arrow, both in the normal-coloured tone
+                cv2.circle(img, (u, v), 1, col, thickness=-1, lineType=cv2.LINE_AA)
+                if smag[i] > 1e-9:
+                    cv2.arrowedLine(img, (u, v), (u + du, v + dv),
+                                    col, 1, line_type=cv2.LINE_AA, tipLength=0.35)
+            else:
+                cv2.circle(img, (u, v), 3, col, thickness=-1, lineType=cv2.LINE_AA)
+                if smag[i] > 1e-9:
+                    cv2.arrowedLine(img, (u, v), (u + du, v + dv),
+                                    (255, 255, 255), 1, line_type=cv2.LINE_AA, tipLength=0.3)
 
         return torch.as_tensor(img, dtype=torch.uint8, device=self.device)
 
