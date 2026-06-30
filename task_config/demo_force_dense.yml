@@ -1,0 +1,30 @@
+decimation: 1
+episode_num: 100
+observations:
+  actor: true
+  camera:
+  - rgb
+  embodiment:
+  - joint
+  - ee
+  tactile:
+  - rgb
+  - rgb_marker
+  - marker
+  - depth
+  - pose
+  - points
+  - contact_force
+  - marker_force
+  - marker_force_scatter
+  - marker_force_img
+  - force_field
+  - force_field_img
+random_texture: false
+render_frequency: 0
+save_dir: ./data_force
+save_frequency: 2
+sensor_type: gsmini
+use_seed: true
+video_frequency: 2
+dense_gelpad: true
