@@ -331,6 +331,12 @@ class VisualTactileSensor:
                 obs['pose'] = self.get_attach_pose().totensor()
             elif data_type == 'contact_force':
                 obs['contact_force'] = self._get_contact_force()
+            elif data_type == 'marker_force':
+                obs['marker_force'] = self.get_marker_force(mode='interp')
+            elif data_type == 'marker_force_scatter':
+                obs['marker_force_scatter'] = self.get_marker_force(mode='scatter')
+            elif data_type == 'marker_force_img':
+                obs['marker_force_img'] = self.get_marker_force_image(mode='interp')
         return obs
 
     def _get_contact_force(self):
@@ -347,6 +353,165 @@ class VisualTactileSensor:
                 loc = torch.as_tensor(idx[m] - start, device=self.device, dtype=torch.long)
                 dense[loc] = torch.as_tensor(-grad[m], dtype=torch.float32, device=self.device)
         return dense
+
+    def _world_to_sensor_rot(self):
+        """[PATCH-B] Rotation matrix (local->world, 3x3) of the sensor camera frame.
+
+        Same frame the marker flow is computed in, so the resulting force axes line up with the
+        marker-flow axes (xy ~ shear, z ~ gel normal). For a force (free vector, no translation):
+        f_sensor = f_world @ R.
+        """
+        cam = self.sensor.camera
+        cam._update_poses(cam._ALL_INDICES)
+        R = math_utils.matrix_from_quat(cam._data.quat_w_ros)  # (num_envs, 3, 3)
+        return R[0]
+
+    def _precompute_marker_force_maps(self):
+        """[PATCH-B] Build the marker<->mesh maps used to project per-vertex contact force onto
+        the marker grid. Cached on first use (must run after setup() initialised the bindings)."""
+        mm = self.sensor.marker_motion_simulator.marker_motion_sim  # VisionTactileSensorUIPC
+        if not hasattr(mm, "marker_surf_idx"):
+            raise RuntimeError(
+                "Marker<->mesh binding not found. get_marker_force only works with the FEM "
+                "(ManiSkill) marker simulator, and after TactileManager.setup() has run."
+            )
+        # barycentric binding: surface-local vertex indices + weights, in the marker-grid order
+        self._mf_surf_idx = torch.as_tensor(mm.marker_surf_idx, device=self.device, dtype=torch.long)     # (M,3)
+        self._mf_weight = torch.as_tensor(mm.marker_weight, device=self.device, dtype=torch.float32)      # (M,3)
+        self._mf_surf_global = torch.as_tensor(mm.vertices_on_surface, device=self.device, dtype=torch.long)  # (N_surf,)
+        self._mf_num_markers = int(self._mf_surf_idx.shape[0])
+
+        # Marker positions in the gel/camera xy plane, reconstructed from the same binding so they
+        # share the surface vertices' frame. Used to assign a nearest marker to each surface vertex.
+        surf_xy = mm.init_surface_vertices_camera[:, :2].to(self.device, dtype=torch.float32)  # (N_surf,2)
+        marker_xy = (surf_xy[self._mf_surf_idx] * self._mf_weight[..., None]).sum(1)           # (M,2)
+        self._mf_nearest = torch.argmin(torch.cdist(surf_xy, marker_xy), dim=1)                # (N_surf,)
+
+    def get_marker_force(self, mode: str = 'interp', in_sensor_frame: bool = True, reshape: bool = False):
+        """[PATCH-B] Map the per-vertex UIPC contact force onto the marker grid.
+
+        Two strategies (use the same marker<->mesh binding as the marker flow):
+
+        - mode='interp' (gather): each marker samples the force field at its location,
+          f_m = w0*f0 + w1*f1 + w2*f2 over the 3 vertices it is bound to. Spatially aligned with
+          the marker flow, but NOT force-conserving (Sum_markers != Sum_surface) and only "sees"
+          the 3 vertices per marker.
+        - mode='scatter' (nearest marker): every sensing-surface vertex dumps its full force onto
+          its nearest marker. Conserves total force over the sensing surface
+          (Sum_markers == Sum_surface), at coarser spatial localization.
+
+        Args:
+            mode: 'interp' or 'scatter'.
+            in_sensor_frame: if True, rotate force from world frame into the sensor camera frame
+                (xy ~ shear, z ~ gel normal). If False, return world-frame force.
+            reshape: if True and the marker count matches marker_shape, return
+                (marker_shape[1], marker_shape[0], 3); otherwise return (M, 3).
+
+        Returns:
+            Tensor of shape (M, 3) (or grid-shaped if reshape=True).
+        """
+        if not hasattr(self, "_mf_surf_idx"):
+            self._precompute_marker_force_maps()
+
+        force_w = self._get_contact_force()          # (N_v, 3) world frame, sparse
+        force_surf = force_w[self._mf_surf_global]    # (N_surf, 3)
+
+        if mode == 'interp':
+            marker_force = (force_surf[self._mf_surf_idx] * self._mf_weight[..., None]).sum(1)  # (M,3)
+        elif mode == 'scatter':
+            marker_force = torch.zeros((self._mf_num_markers, 3), dtype=force_surf.dtype, device=self.device)
+            marker_force.index_add_(0, self._mf_nearest, force_surf)
+        else:
+            raise ValueError(f"Unknown marker force mode: {mode!r} (use 'interp' or 'scatter')")
+
+        if in_sensor_frame:
+            R = self._world_to_sensor_rot().to(marker_force.dtype)  # local->world
+            marker_force = marker_force @ R                          # world -> sensor-local
+
+        if reshape:
+            sx, sy = self.sensor.marker_motion_simulator.marker_motion_sim.marker_shape
+            if marker_force.shape[0] == sx * sy:
+                marker_force = marker_force.reshape(sy, sx, 3)
+        return marker_force
+
+    def get_marker_force_image(
+        self,
+        mode: str = 'interp',
+        base: str = 'rgb',
+        shear_scale: float = None,
+        normal_scale: float = None,
+    ):
+        """[PATCH-B] Render the marker force field as an image (for inspection / video).
+
+        At each marker (regular lattice position) draws:
+          - a filled dot coloured by the normal force Fz (JET: blue = low, red = high), and
+          - an arrow for the in-plane shear (Fx, Fy).
+
+        Args:
+            mode: force mapping mode, 'interp' or 'scatter' (see get_marker_force).
+            base: background image -- 'rgb' (optical), 'rgb_marker' (optical+markers) or 'white'.
+            shear_scale: pixels per force-unit for the shear arrows. None -> auto (max arrow ~20px).
+            normal_scale: force-unit mapped to the colormap extreme. None -> auto (per-frame max|Fz|).
+                Pass a fixed value for frame-to-frame comparable colours.
+
+        Returns:
+            (H, W, 3) uint8 torch tensor (RGB).
+        """
+        import cv2
+        mm = self.sensor.marker_motion_simulator.marker_motion_sim
+        if not hasattr(self, "_mf_surf_idx"):
+            self._precompute_marker_force_maps()
+
+        H, W = mm.tactile_img_height, mm.tactile_img_width
+
+        # --- background image (H, W, 3) uint8 RGB ---
+        if base == 'rgb':
+            img = self.sensor.data.output['tactile_rgb'].squeeze(0).cpu().numpy()
+        elif base == 'rgb_marker':
+            img = self.sensor.data.output['marker_rgb'].squeeze(0).cpu().numpy()
+        elif base == 'white':
+            img = np.full((H, W, 3), 255, dtype=np.uint8)
+        else:
+            raise ValueError(f"Unknown base: {base!r} (use 'rgb', 'rgb_marker' or 'white')")
+        img = np.ascontiguousarray(img.astype(np.uint8))
+
+        # --- force (sensor frame: xy = shear, z = normal), aligned with the marker order ---
+        force = self.get_marker_force(mode=mode, in_sensor_frame=True).cpu().numpy()  # (M,3)
+
+        # --- marker uv = project the reference (undeformed) lattice through the camera ---
+        ref_pts = (
+            mm.reference_surface_vertices_camera[self._mf_surf_idx].cpu().numpy()
+            * self._mf_weight.cpu().numpy()[..., None]
+        ).sum(1).astype(np.float32)                                   # (M,3) camera frame
+        uv = mm.gen_marker_uv(ref_pts)                                # (M,2) pixels
+
+        # --- normal -> colour (JET, RGB) ---
+        fz = force[:, 2]
+        s_n = (np.abs(fz).max() if normal_scale is None else normal_scale)
+        s_n = s_n if s_n > 1e-9 else 1.0
+        cidx = (np.clip(fz / s_n, -1, 1) * 0.5 + 0.5) * 255
+        colors = cv2.applyColorMap(cidx.reshape(-1, 1).astype(np.uint8), cv2.COLORMAP_JET)
+        colors = colors.reshape(-1, 3)[:, ::-1]                       # BGR -> RGB
+
+        # --- shear auto-scale so the largest arrow is ~20px ---
+        shear = force[:, :2]
+        smag = np.linalg.norm(shear, axis=1)
+        if shear_scale is None:
+            shear_scale = (20.0 / smag.max()) if smag.max() > 1e-9 else 0.0
+
+        for i in range(uv.shape[0]):
+            u, v = int(round(uv[i, 0])), int(round(uv[i, 1]))
+            if not (0 <= u < W and 0 <= v < H):
+                continue
+            col = tuple(int(c) for c in colors[i])
+            cv2.circle(img, (u, v), 3, col, thickness=-1, lineType=cv2.LINE_AA)
+            if smag[i] > 1e-9:
+                du = int(round(shear[i, 0] * shear_scale))
+                dv = int(round(shear[i, 1] * shear_scale))
+                cv2.arrowedLine(img, (u, v), (u + du, v + dv),
+                                (255, 255, 255), 1, line_type=cv2.LINE_AA, tipLength=0.3)
+
+        return torch.as_tensor(img, dtype=torch.uint8, device=self.device)
 
     def _reset_idx(self):
         self.init_pose_mat = self.get_attach_pose().to_transformation_matrix()

@@ -15,6 +15,9 @@ observations:
   - pose
   - points
   - contact_force
+  - marker_force
+  - marker_force_scatter
+  - marker_force_img
 random_texture: false
 render_frequency: 0
 save_dir: ./data_force
