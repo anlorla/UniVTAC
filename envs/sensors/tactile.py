@@ -337,6 +337,10 @@ class VisualTactileSensor:
                 obs['marker_force_scatter'] = self.get_marker_force(mode='scatter')
             elif data_type == 'marker_force_img':
                 obs['marker_force_img'] = self.get_marker_force_image(mode='interp')
+            elif data_type == 'force_field':
+                obs['force_field'] = self.get_force_field()
+            elif data_type == 'force_field_img':
+                obs['force_field_img'] = self.get_force_field_image()
         return obs
 
     def _get_contact_force(self):
@@ -533,6 +537,93 @@ class VisualTactileSensor:
                     cv2.arrowedLine(img, (u, v), (u + du, v + dv),
                                     (255, 255, 255), 1, line_type=cv2.LINE_AA, tipLength=0.3)
 
+        return torch.as_tensor(img, dtype=torch.uint8, device=self.device)
+
+    def _precompute_force_field_map(self, grid):
+        """[PATCH-C] Build a dense (W x H) sampling grid over the gel surface and bind each grid
+        point to the surface mesh by barycentric interpolation (via Delaunay on the reference
+        surface). Cached per grid size. grid = (W, H).
+
+        NOTE: this densely RESAMPLES the same per-vertex force field; the real spatial resolution
+        is still capped by the gel mesh (a denser grid is interpolation, not new information).
+        """
+        from scipy.spatial import Delaunay
+        mm = self.sensor.marker_motion_simulator.marker_motion_sim
+        if not hasattr(self, "_mf_surf_global"):
+            self._precompute_marker_force_maps()
+        surf_xy = mm.init_surface_vertices_camera[:, :2].cpu().numpy().astype(np.float64)  # (N_surf,2)
+        W, H = int(grid[0]), int(grid[1])
+        (xmin, ymin), (xmax, ymax) = surf_xy.min(0), surf_xy.max(0)
+        GX, GY = np.meshgrid(np.linspace(xmin, xmax, W), np.linspace(ymin, ymax, H))  # (H,W)
+        pts = np.stack([GX.ravel(), GY.ravel()], axis=1)                              # (H*W,2)
+
+        tri = Delaunay(surf_xy)
+        s = tri.find_simplex(pts)                                # (H*W,), -1 outside the surface
+        T = tri.transform[s]
+        bc = np.einsum("nij,nj->ni", T[:, :2, :], pts - T[:, 2, :])
+        bary = np.concatenate([bc, 1.0 - bc.sum(1, keepdims=True)], axis=1)           # (N,3)
+        verts = tri.simplices[s]                                 # (N,3) surface-local vertex idx
+        valid = s >= 0
+        verts[~valid] = 0
+        bary[~valid] = 0.0
+
+        self._ff_grid = (W, H)
+        self._ff_verts = torch.as_tensor(verts, device=self.device, dtype=torch.long)    # (N,3)
+        self._ff_bary = torch.as_tensor(bary, device=self.device, dtype=torch.float32)   # (N,3)
+        self._ff_valid = torch.as_tensor(valid, device=self.device).float()[:, None]     # (N,1)
+
+    def get_force_field(self, grid=(64, 48), in_sensor_frame=True):
+        """[PATCH-C] Dense tactile force field: barycentric-interpolate the per-vertex UIPC contact
+        force onto a regular grid over the gel surface. Returns (H, W, 3) (rows=H, cols=W), in the
+        sensor frame (xy = shear, z = normal) by default.
+
+        This is the same physical force as `marker_force`, just densely resampled to grid=(W,H).
+        It does NOT add spatial resolution beyond the gel mesh -- a 64x48 grid interpolates the
+        ~60-70 contact vertices up to 3072 cells. For true higher resolution, refine the gel mesh.
+        """
+        if getattr(self, "_ff_grid", None) != (int(grid[0]), int(grid[1])):
+            self._precompute_force_field_map(grid)
+        force_surf = self._get_contact_force()[self._mf_surf_global]            # (N_surf,3) world
+        fld = (force_surf[self._ff_verts] * self._ff_bary[..., None]).sum(1) * self._ff_valid  # (N,3)
+        if in_sensor_frame:
+            fld = fld @ self._world_to_sensor_rot().to(fld.dtype)              # world -> sensor
+        W, H = self._ff_grid
+        return fld.reshape(H, W, 3)
+
+    def get_force_field_image(self, grid=(64, 48), upscale=8, arrow_every=6,
+                              normal_scale=None, shear_scale=None):
+        """[PATCH-C] Render the dense force field as a TacFF-style image: normal force |fz| as a
+        black->green->red intensity map (black = no contact), with sub-sampled white shear arrows.
+        Returns an (H*upscale, W*upscale, 3) uint8 RGB tensor.
+        """
+        import cv2
+        fld = self.get_force_field(grid=grid, in_sensor_frame=True).cpu().numpy()  # (H,W,3)
+        H, W = fld.shape[:2]
+        fz = fld[..., 2]
+        shear = fld[..., :2]
+        s_n = (np.abs(fz).max() if normal_scale is None else normal_scale)
+        s_n = s_n if s_n > 1e-9 else 1.0
+        t = np.clip(np.abs(fz) / s_n, 0.0, 1.0)
+        # green->red ramp, brightness = activation so no-contact -> black
+        img = np.zeros((H, W, 3), np.float32)
+        img[..., 0] = t * t * 255.0          # R grows with contact
+        img[..., 1] = (1.0 - t) * t * 255.0  # G peaks at light contact
+        img = np.ascontiguousarray(np.clip(img, 0, 255).astype(np.uint8))
+        img = cv2.resize(img, (W * upscale, H * upscale), interpolation=cv2.INTER_LINEAR)
+
+        smag = np.linalg.norm(shear, axis=2)
+        if shear_scale is None:
+            mx = smag.max()
+            shear_scale = (arrow_every * upscale * 0.9 / mx) if mx > 1e-9 else 0.0
+        for r in range(0, H, arrow_every):
+            for c in range(0, W, arrow_every):
+                if smag[r, c] <= 1e-9:
+                    continue
+                u, v = int((c + 0.5) * upscale), int((r + 0.5) * upscale)
+                du = int(shear[r, c, 0] * shear_scale)
+                dv = int(shear[r, c, 1] * shear_scale)
+                cv2.arrowedLine(img, (u, v), (u + du, v + dv),
+                                (255, 255, 255), 1, line_type=cv2.LINE_AA, tipLength=0.3)
         return torch.as_tensor(img, dtype=torch.uint8, device=self.device)
 
     def _reset_idx(self):
