@@ -10,13 +10,14 @@ import torch
 #   盘用 PLATE.usd(浅圆盘 Ø200, 边沿 8mm)。球用 BALL.usd(⌀16mm)。
 # ----------------------------------------------------------------------------
 #   相机/视角沿用 dual_screw_sleeve 的居中俯视范式(原来的偏置视角看着很怪)。
-#   抓取改用 grasp_actor(和 screw 一致, 稳; 之前手写带约束的直线进刀规划失败)。抓后 weld 杯到夹爪。
+#   抓取改为杯身【侧抓】: 先到杯侧上方, 再竖直降到杯旁, 最后水平直线进刀闭合。
+#   这样倾倒时手腕对杯有更大力臂, 比之前从正上方夹杯口更容易真正翻杯倒球。抓后 weld 杯到夹爪。
 #   场景中心放在 (0.5, 0)(基座正前方), 与 screw 任务一致。
 # ============================================================================
 
 # ---- 几何 (m) ----
-CUP_SCALE  = 0.62                    # 缩小到口外⌀~47mm: 远小于夹爪最大开度(~78mm), 从上方下夹时两指有充裕余量,
-                                     # 不再像 0.92(口⌀~70mm)那样卡住宽口沿把杯碰倒/抓空
+CUP_SCALE  = 0.93                    # 当前版本把杯放大到原先 1.5x(0.62 -> 0.93), 口外⌀~71mm, 接近夹爪开度上限;
+                                     # 现改用侧抓而非顶抓, 主要依赖从杯身侧壁进刀而不是跨过杯口
 CUP_HALF   = 0.046 * CUP_SCALE       # 杯半高(原点->口沿/底)
 CUP_TOP_R  = 0.038 * CUP_SCALE       # 杯口外半径
 BALL_R     = 0.008                   # 小球半径(BALL.usd, ⌀16mm)
@@ -28,17 +29,23 @@ PLATE_R    = 0.10                    # 盘外半径(Ø200)
 # ---- 摆位 [tune] (世界系) —— 场景中心在 (0.5,0), 同 screw 任务 ----
 UPRIGHT      = [1, 0, 0, 0]
 GAP          = 0.006                                          # 防 UIPC 初始穿透的小间隙
-PLATE_POS    = Pose([0.50,  0.10, PLATE_CZ], UPRIGHT)         # 盘(接收面/倾倒目标)
-CUP_POS      = Pose([0.50, -0.10, TABLE_TOP + CUP_HALF + GAP], UPRIGHT)   # 杯(被抓, 内含球)
+PLATE_POS    = Pose([0.50, -0.10, PLATE_CZ], UPRIGHT)         # 盘(接收面/倾倒目标) - 与杯交换位置
+CUP_POS      = Pose([0.50,  0.10, TABLE_TOP + CUP_HALF + GAP], UPRIGHT)   # 杯(被抓, 内含球) - 与盘交换位置
 BALL_DZ      = -CUP_HALF + 0.006 + BALL_R                     # 球相对杯心的 z(落在杯内底, 不穿壁)
 
 # ---- 抓取 / 倾倒 [tune] ----
-CUP_GRASP_DZ = 0.012                 # 抓取点相对杯心的 +z: 取到杯上半身(口沿下方), 从上方下夹这一圈杯壁
-LIFT_RISE    = 0.16                  # 抓后竖直举起高度
-POUR_OVER_Y  = 0.0                   # 倾倒位杯心 = 盘心正上方(球基本竖直落到盘心)
-POUR_Z       = 0.24                  # 倾倒时杯体心世界 z(抬高: 翻杯时 EE 绕夹持点下摆, 夹持点高些 EE 才不会摆到够不到的低位姿)
-POUR_ANGLE   = 125.0 / 180.0 * np.pi    # 翻转角: 翻到口朝下 35°(>90°)球已倒出; 停在腕关节极限(~135°)之前避免规划失败
-POUR_STEPS   = 12                    # 分步翻转(细 -> 柔, 球不被甩远)
+CUP_GRASP_DZ = 0.015                 # 杯放大后抓取点略上移, 仍夹在上半身靠口沿下方的杯壁
+CUP_SIDE_APPROACH = 0.14             # 杯放大后, 侧抓时沿接近方向在杯外退开的距离也相应加大
+CUP_SIDE_UP = 0.10                   # 侧抓预备位在杯侧上方抬高量
+PREGRASP_CLEARANCE = 0.12            # 先原地竖直抬高再去预抓位, 避免斜线切向杯子把它碰倒
+GRIP_CLOSE   = 0.60                  # 抓取闭合量(0=全闭/1=全开): 放松一些, 避免把大杯夹得过紧而挤形/扰动
+LIFT_RISE    = 0.16                  # 保留作经验量级参考; 当前改为直接 move_to_pose 到倾倒预备位
+POUR_OVER_Y  = 0.00                  # 倾倒位直接放到盘心上方, 不再保留之前那个人工偏置
+POUR_Z       = 0.26                  # 倾倒位再抬高些, 给大杯+大角度翻转更多工作空间
+POUR_PREP_X  = -0.03                 # 倾倒预备位略向机器人回收一点, 避免翻腕起始位太伸
+POUR_ANGLE   = 210.0 / 180.0 * np.pi    # 过翻一些, 避免实际停在“接近倒扣但还不够”的姿态
+POUR_LIFT    = 0.00                  # 倾倒阶段只翻腕不再同步抬高手位
+POUR_JOINT_STEPS = 80                # 直接转 wrist joint 的插值步数
 
 
 @configclass
@@ -110,40 +117,61 @@ class Task(BaseTask):
 
     # ---------------------------------------------------------------- helpers
     def _grasp_cup(self):
-        """从【正上方】抓取杯子(同 screw 任务范式, 用 grasp_actor): 夹爪竖直朝下, 张开跨过杯口, 两指沿杯外壁
-           下落到杯上部(口沿下一点), 自适应闭合从两侧(±x)夹住这圈杯壁。
-           grasp_actor 自动: 先到抓取点正上方 pre_dis 处 -> 竖直下降到抓取点 -> (此处不闭合, 之后单独自适应闭合)。
-           CUP.usd 无预设抓取点, 用 construct_grasp_pose 现算并登记一个 contact 点。"""
-        grasp_from = np.array([0.0, 0.0, 1.0])   # 从正上方接近(夹爪 z 轴朝下)
-        camera_up = np.array([0.0, -1.0, 0.0])   # 同 screw 套筒 top-down: 指头沿 world-x 开合 -> 夹住杯 ±x 壁
+        """从【侧面】抓杯上半身。
+
+        轨迹采用两段式接近, 避免像顶抓那样直接压到杯口:
+          1) 到杯侧上方悬停;
+          2) 竖直降到杯侧;
+          3) 沿夹爪局部 z(水平接近轴)直线进刀到杯心;
+          4) 闭爪夹住杯身。
+        """
+        grasp_from = np.array([0.0, 1.0, 0.0], dtype=float)   # 恢复从 +Y 侧水平接近(旧方向)
+        camera_up = np.array([0.0, 0.0, -1.0], dtype=float)   # 去掉不必要的 180° 翻腕; 指头仍沿 world-x 开合
+        gf = grasp_from / np.linalg.norm(grasp_from)
         self.move(self.atom.open_gripper(1.0))
-        target = self.cup.get_pose().add_bias([0.0, 0.0, CUP_GRASP_DZ], coord='world')   # 杯上部高度
-        gc = construct_grasp_pose(np.array(target.p, dtype=float), grasp_from, camera_up)
-        self.cup_grasp_id = self.cup.register_point(gc, type='contact')     # 给杯登记 contact 抓取点(资产本身无预设点)
-        self.move(self.atom.grasp_actor(self.cup, contact_point_id=self.cup_grasp_id,
-                                        pre_dis=0.12, dis=0.0, is_close=False))   # 从上方下降到抓取点
-        self.move(self.atom.close_gripper(0.0))    # 直接 100% 闭合夹死(非自适应); 物理上指头停在杯壁, 持续夹紧不打滑
+        self.move(self.atom.move_by_displacement(z=PREGRASP_CLEARANCE, xyz_coord='world'),
+                  tag='grasp_side_clearance', time_dilation_factor=0.5)
+        target = self.cup.get_pose().add_bias([0.0, 0.0, CUP_GRASP_DZ], coord='world')
+        gc = construct_grasp_pose(np.array(target.p, dtype=float), gf, camera_up)
+        gc_side = gc.add_bias((gf * CUP_SIDE_APPROACH).tolist(), coord='world')
+        ee_side = self._robot_manager.gripper_center_to_ee(gc_side)
+        ee_high = ee_side.add_bias([0.0, 0.0, CUP_SIDE_UP], coord='world')
+        ee_now = self._robot_manager.get_ee_pose()
+        ee_transit = Pose([ee_high.p[0], ee_high.p[1], ee_now.p[2]], ee_now.q)
+        self.move(self.atom.move_to_pose(ee_transit), tag='grasp_side_horizontal')
+        self.move(self.atom.move_to_pose(ee_high), tag='grasp_side_presolve')
+        self.move(self.atom.move_to_pose(ee_side), tag='grasp_side_drop')
+        self.move(self.atom.move_by_displacement(z=CUP_SIDE_APPROACH + 0.01, xyz_coord='local'),
+                  tag='grasp_side_insert', constraint_pose=[1, 1, 1, 1, 1, 0], time_dilation_factor=0.5)
+        self.move(self.atom.close_gripper(GRIP_CLOSE))    # 闭到 GRIP_CLOSE(不闭到0): 0 会把杯死压在软 gelpad 上 -> 接触不稳, 杯在空中晃/自转
+        if self.no_tactile:
+            # 运动测试模式(UNIVTAC_NO_TACTILE=1): 无 gelpad 接触, 靠 weld 把杯刚性绑到夹爪才能搬运/倾倒
+            self.weld_actor(self.cup, self._robot_manager)
 
     def _pour(self):
-        """倒球: ① 把杯(连同在手)平移到盘上方(保持竖直) -> ② 用引擎自带 gripper_rotate 翻杯倒出
-           (lift_can 倒罐同款原语: 绕杯自身轴逐步翻、保持夹爪朝向, curobo 可解、不甩到够不到的位姿)。"""
-        # ① 平移到盘上方(杯保持竖直)。用【相对位移】而非在手绝对位姿: 不 weld 时杯会在指间微滑,
-        #    用 inhand 反算的绝对夹爪目标会漂到够不到处(规划失败)。改为按"杯当前实际位置 -> 目标"的世界位移
-        #    平移夹爪, 杯随夹爪一起走, 鲁棒且不依赖在手变换。
-        cup_now = np.array(self.cup.get_pose().p, dtype=float)
-        target_xyz = np.array([PLATE_POS.p[0], PLATE_POS.p[1] + POUR_OVER_Y, POUR_Z], dtype=float)
-        d = target_xyz - cup_now
-        self.move(self.atom.move_by_displacement(x=float(d[0]), y=float(d[1]), z=float(d[2]), xyz_coord='world'),
-                  tag='move_over_plate', time_dilation_factor=0.5)
-        # ② 翻杯倒出: 直接【设新的夹爪位姿】来转手腕(gripper_rotate 只挪位置不转朝向, 手腕几乎不动)。
-        #    取当前夹爪中心位姿, 绕【过夹持点的 world-x 轴】把朝向旋转 POUR_ANGLE(位置保持在盘上方),
-        #    分步插值 move_to_pose -> 杯子真正翻过来(口朝下), 球倒到盘上。
+        """倒球: 直接 move 到盘上方的倾倒预备位, 然后分步翻杯。
+
+        去掉"先抬一段再按位移横挪"这类中间动作, 直接把当前夹爪中心 move_to_pose 到盘上方,
+        让路径更短更干净, 也减少抓起后到倾倒前的无效摆动。
+        """
         gc0 = self._robot_manager.get_gripper_center_pose()
-        for i in range(1, POUR_STEPS + 1):
-            ang = POUR_ANGLE * i / POUR_STEPS
-            gc_i = gc0.add_rotation([ang, 0.0, 0.0], coord='local')   # 绕 world-x 翻朝向, 夹持点位置不动
-            ee_i = self._robot_manager.gripper_center_to_ee(gc_i)
-            self.move(self.atom.move_to_pose(ee_i), tag='pour', time_dilation_factor=0.5)
+        gc_prep = Pose([PLATE_POS.p[0] + POUR_PREP_X, PLATE_POS.p[1] + POUR_OVER_Y, POUR_Z], gc0.q)
+        ee_prep = self._robot_manager.gripper_center_to_ee(gc_prep)
+        self.move(self.atom.move_to_pose(ee_prep), tag='move_over_plate', time_dilation_factor=0.5)
+
+        # 直接在关节空间翻 wrist joint，绕过末端位姿规划失败。
+        arm_q = self._robot_manager.robot.data.joint_pos[0, :7].clone()
+        start_q7 = arm_q[6].item()
+        target_q7 = start_q7 - POUR_ANGLE
+        q7_seq = torch.linspace(start_q7, target_q7, POUR_JOINT_STEPS, device=self.device)
+        self.atom_id += 1
+        self.atom_tag = 'pour'
+        for q7 in q7_seq:
+            q = arm_q.clone()
+            q[6] = q7
+            self._robot_manager.set_arm(q, force=True)
+            self._step(is_save=True)
+        self._update_render()
         self.delay(30, is_save=True)   # 倒后停留, 让球落定在盘上
 
     # ---------------------------------------------------------------- script
@@ -153,8 +181,6 @@ class Task(BaseTask):
 
     def _play_once(self):
         self._grasp_cup()                                                   # 抓住杯
-        self.move(self.atom.move_by_displacement(z=LIFT_RISE, xyz_coord='world'),
-                  tag='lift', time_dilation_factor=0.5)                     # 竖直举起(不加约束, 侧抓后局部 z 是水平的)
         self._pour()                                                        # 移到盘上方并倾倒
 
     # ---------------------------------------------------------------- success

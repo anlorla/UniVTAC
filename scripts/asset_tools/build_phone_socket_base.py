@@ -1,4 +1,4 @@
-"""Generate a socket base with a vertical insertion hole for the phone plug.
+"""Generate a socket base with two vertical pin holes.
 
 Usage:
   python scripts/asset_tools/build_phone_socket_base.py [out.obj]
@@ -10,30 +10,51 @@ import trimesh
 out = sys.argv[1] if len(sys.argv) > 1 else "/tmp/phone_socket_assets/PHONE_SOCKET_BASE.obj"
 os.makedirs(os.path.dirname(out), exist_ok=True)
 
-# Plug tongue section is 8.8 x 2.8 mm.
-# Keep generous clearance so the unplug/replug task is motion-planning dominated,
-# not contact-jam dominated.
-CLR = 1.3
-HOLE_W = 8.8 + 2 * CLR
-HOLE_T = 2.8 + 2 * CLR
-BASE = [28.0, 18.0, 12.0]
-HOLE_DEPTH = 7.0
-LEAD = 1.0
+BASE = [30.0, 20.0, 12.0]
+PIN_R = 1.1
+CLR = 0.85
+PIN_DX = 4.0
+HOLE_DEPTH = 11.5
+LEAD_R = 1.3
+LEAD_H = 1.5
+
+
+def make_lead_in(radius_top, radius_bottom, height, sections=32):
+    top_overhang = 0.2
+    slope_depth = height + top_overhang
+    cone_height = slope_depth * radius_top / (radius_top - radius_bottom)
+    lead = trimesh.creation.cone(radius=radius_top, height=cone_height, sections=sections)
+    lead.apply_scale([1.0, 1.0, -1.0])
+    lead.apply_translation([0.0, 0.0, top_overhang])
+    return lead
+
 
 outer = trimesh.creation.box(extents=BASE)
 outer.apply_translation([0.0, 0.0, BASE[2] * 0.5])
 
-main = trimesh.creation.box(extents=[HOLE_W, HOLE_T, HOLE_DEPTH * 2.0])
-main.apply_translation([0.0, 0.0, BASE[2]])
+hole_r = PIN_R + CLR
+lead_r = hole_r + LEAD_R
 
-lead = trimesh.creation.box(extents=[HOLE_W + 2 * LEAD, HOLE_T + 2 * LEAD, 3.0])
-lead.apply_translation([0.0, 0.0, BASE[2]])
+main_l = trimesh.creation.cylinder(radius=hole_r, height=HOLE_DEPTH * 2.0, sections=32)
+main_l.apply_translation([-PIN_DX, 0.0, BASE[2]])
+main_r = trimesh.creation.cylinder(radius=hole_r, height=HOLE_DEPTH * 2.0, sections=32)
+main_r.apply_translation([PIN_DX, 0.0, BASE[2]])
 
-slot = trimesh.boolean.difference([outer, main, lead])
+lead_l = make_lead_in(radius_top=lead_r, radius_bottom=hole_r, height=LEAD_H, sections=32)
+lead_l.apply_translation([-PIN_DX, 0.0, BASE[2]])
+lead_r_mesh = make_lead_in(radius_top=lead_r, radius_bottom=hole_r, height=LEAD_H, sections=32)
+lead_r_mesh.apply_translation([PIN_DX, 0.0, BASE[2]])
+
+cut_l = trimesh.boolean.union([main_l, lead_l])
+cut_r = trimesh.boolean.union([main_r, lead_r_mesh])
+slot = trimesh.boolean.difference([outer, cut_l, cut_r])
+slot.merge_vertices()
+slot.update_faces(slot.unique_faces())
+slot.update_faces(slot.nondegenerate_faces())
 slot.apply_scale(0.001)
 slot.export(out)
 
 print(
-    f"saved {out} hole(mm)={HOLE_W:.2f}x{HOLE_T:.2f} depth={HOLE_DEPTH:.2f} "
+    f"saved {out} hole_r(mm)={hole_r:.2f} pin_dx(mm)={PIN_DX:.2f} depth(mm)={HOLE_DEPTH:.2f} "
     f"watertight={slot.is_watertight}"
 )

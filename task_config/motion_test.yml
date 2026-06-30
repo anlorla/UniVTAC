@@ -1,0 +1,18 @@
+# Fast MOTION-CHECK config: no video / no per-step camera rendering, and (with UNIVTAC_NO_TACTILE=1)
+# no gelpad/tactile simulation. Use to verify the scripted motion / motion planner quickly, then
+# switch to a normal config (e.g. pour_ball_try / record_one) for the real tactile run.
+#   UNIVTAC_NO_TACTILE=1 python scripts/collect_data.py <task> motion_test
+# Output: metadata.json (result + ball/actor poses) and the log (planning success/failures). NO video.
+save_dir: ./data
+decimation: 1
+save_frequency: 1
+video_frequency: 0        # 0 -> no video, skips the per-step RTX camera render (the dominant cost)
+render_frequency: 0       # headless
+use_seed: true
+episode_num: 1
+start_seed: 0
+max_seed: 0
+sensor_type: gsmini
+observations:             # minimal: robot state + actor poses only (no camera, no tactile)
+  embodiment: ['joint', 'ee']
+  actor: true

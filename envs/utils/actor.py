@@ -155,6 +155,37 @@ class Actor(UipcObject):
         prim = self._prim_view.prims[0]
         prim_path = str(prim.GetPath())
         self._set_texture(prim_path, mdl_path, rng=rng)
+
+    def set_color(self, color: tuple[float, float, float], name="ActorColor"):
+        for prim in self._prim_view.prims:
+            self._set_color(str(prim.GetPath()), color, name=name)
+
+    @staticmethod
+    def _set_color(prim_path: str, color: tuple[float, float, float], name="ActorColor"):
+        def find_mesh(prim):
+            if prim.GetTypeName() == "Mesh":
+                return prim
+            for child in prim.GetChildren():
+                mesh_prim = find_mesh(child)
+                if mesh_prim is not None:
+                    return mesh_prim
+            return None
+
+        stage = omni.usd.get_context().get_stage()
+        prim = stage.GetPrimAtPath(prim_path)
+        mesh_prim = find_mesh(prim)
+        if mesh_prim is None:
+            return
+
+        UsdGeom.Scope.Define(stage, f"{prim_path}/Looks")
+        mat = UsdShade.Material.Define(stage, f"{prim_path}/Looks/{name}")
+        shader = UsdShade.Shader.Define(stage, f"{prim_path}/Looks/{name}/Shader")
+        shader.CreateIdAttr("UsdPreviewSurface")
+        shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(*color))
+        shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(0.7)
+        shader.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set(0.0)
+        mat.CreateSurfaceOutput().ConnectToSource(shader.ConnectableAPI(), "surface")
+        UsdShade.MaterialBindingAPI.Apply(mesh_prim).Bind(mat)
     
     @staticmethod
     def _set_texture(prim_path:str, mdl_path:str, rng=None):

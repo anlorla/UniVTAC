@@ -4,14 +4,14 @@ decimation: 1
 
 save_frequency: 2
 video_frequency: 2
-render_frequency: 0  # 0 = headless (no GUI window)
+render_frequency: 0
 
 random_texture: false
 
 use_seed: true
-episode_num: 100
-start_seed: -1  # -1 = auto-resume from suc_map.txt (continue where it left off)
-max_seed: -1  # unlimited seeds until 100 successes collected
+episode_num: 1
+start_seed: 0
+max_seed: 0
 
 sensor_type: gsmini
 

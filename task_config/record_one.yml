@@ -5,8 +5,8 @@
 save_dir: ./data
 decimation: 1
 save_frequency: 1         # save an HDF5 observation every step (highest frequency)
-video_frequency: 1        # write a video frame every step (highest frequency)
-render_frequency: 0       # 0 = headless pure recording; set to 1 to also open an Isaac Sim window
+video_frequency: 2        # 每2步一帧(原为1) 加快渲染
+render_frequency: 4       # 每4步渲染一次, 进一步减轻录制时的渲染负担
 random_texture: false
 use_seed: true
 episode_num: 1            # collect just 1 (successful) episode...

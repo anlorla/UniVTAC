@@ -9,21 +9,28 @@ import torch
 #   base: PHONE_SOCKET_BASE.usd (source/target 共用同一资产)
 # ----------------------------------------------------------------------------
 #   几何约定:
-#   - plug 的 charging tongue 朝 local -Z
+#   - plug 的 two pins 朝 local -Z
 #   - base 的孔口在顶面, 插入方向沿 world -Z
-#   - reset 时 plug 已经插在 source base 里, 机器人需要先抓住机身再拔出
+#   - reset 时 plug 在 source base 孔口正上方, pre_move 先等待其自然落入孔中
 # ============================================================================
 
 BASE_HEIGHT = 0.012
-HOLE_DEPTH = 0.007
-PLUG_TIP = 0.01675
-GRASP_DZ = 0.004
+HOLE_DEPTH = 0.0115
+# PHONE_PLUG.usd is generated centered on its full z bounds; the pin tip is
+# 16.2 mm below the origin with the current builder dimensions.
+PLUG_TIP = 0.0162
+GRASP_DZ = 0.003
 UNPLUG_LIFT = 0.10
 INSERT_DEPTH = 0.011
+INIT_DROP_CLEARANCE = 0.012
 UPRIGHT = [1, 0, 0, 0]
+SOURCE_COLOR = (0.95, 0.38, 0.08)
+TARGET_COLOR = (0.18, 0.18, 0.18)
 
 SOURCE_POS = Pose([0.45, -0.10, 0.002], UPRIGHT)
 TARGET_POS = Pose([0.58, 0.12, 0.002], UPRIGHT)
+SOURCE_XY_NOISE = 0.004
+TARGET_XY_NOISE = 0.006
 
 
 @configclass
@@ -74,18 +81,22 @@ class Task(BaseTask):
         )
 
     def _reset_actors(self):
-        source_pose = SOURCE_POS.add_offset(self.create_noise([0.004, 0.004, 0.0]))
-        target_pose = TARGET_POS.add_offset(self.create_noise([0.004, 0.004, 0.0]))
+        self.source.set_color(SOURCE_COLOR, name="SourceOrange")
+        self.target.set_color(TARGET_COLOR, name="TargetDarkGray")
+
+        source_pose = SOURCE_POS.add_offset(self.create_noise([SOURCE_XY_NOISE, SOURCE_XY_NOISE, 0.0]))
+        target_pose = TARGET_POS.add_offset(self.create_noise([TARGET_XY_NOISE, TARGET_XY_NOISE, 0.0]))
         self.source.set_pose(source_pose)
         self.target.set_pose(target_pose)
 
-        self.source_hole_pose = self.source.get_pose().add_bias([0.0, 0.0, BASE_HEIGHT + PLUG_TIP])
-        self.target_hole_pose = self.target.get_pose().add_bias([0.0, 0.0, BASE_HEIGHT + PLUG_TIP])
-        plug_pose = self.source_hole_pose.add_bias([0.0, 0.0, -HOLE_DEPTH * 0.85])
+        self.source_hole_pose = source_pose.add_bias([0.0, 0.0, BASE_HEIGHT + PLUG_TIP])
+        self.target_hole_pose = target_pose.add_bias([0.0, 0.0, BASE_HEIGHT + PLUG_TIP])
+        plug_pose = self.source_hole_pose.add_bias([0.0, 0.0, INIT_DROP_CLEARANCE])
         self.plug.set_pose(plug_pose)
 
         self.metadata["source_xy"] = [float(source_pose.p[0]), float(source_pose.p[1])]
         self.metadata["target_xy"] = [float(target_pose.p[0]), float(target_pose.p[1])]
+        self.metadata["plug_init_xy"] = [float(plug_pose.p[0]), float(plug_pose.p[1])]
 
     def _close_gripper_direct(self, percent=0.0, settle_steps=10, is_save=True):
         rm = self._robot_manager
@@ -113,7 +124,7 @@ class Task(BaseTask):
         self._close_gripper_direct(0.0, settle_steps=12, is_save=True)
 
     def pre_move(self):
-        self.delay(12)
+        self.delay(120)
 
     def _play_once(self):
         self._grasp_plug_from_source()

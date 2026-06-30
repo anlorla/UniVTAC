@@ -1,8 +1,8 @@
-"""Generate a simple phone charging plug mesh.
+"""Generate a simple two-pin charger plug mesh.
 
 Shape:
-- a compact cable-head body
-- a smaller symmetric charging tongue protruding along -Z
+- compact charger head body
+- two cylindrical pins protruding along -Z
 
 Usage:
   python scripts/asset_tools/build_phone_plug.py [out.obj]
@@ -16,20 +16,25 @@ out = sys.argv[1] if len(sys.argv) > 1 else "/tmp/phone_socket_assets/PHONE_PLUG
 os.makedirs(os.path.dirname(out), exist_ok=True)
 
 # mm
-BODY = [14.0, 8.0, 22.0]
-STRAIN = [10.0, 6.0, 8.0]
-TONGUE = [8.8, 2.8, 6.0]
+BODY = [18.0, 10.0, 18.0]
+STRAIN = [12.0, 8.0, 8.0]
+PIN_R = 1.1
+PIN_L = 8.0
+PIN_DX = 4.0
 
 body = trimesh.creation.box(extents=BODY)
 body.apply_translation([0.0, 0.0, BODY[2] * 0.5])
 
 strain = trimesh.creation.box(extents=STRAIN)
-strain.apply_translation([0.0, 0.0, BODY[2] + STRAIN[2] * 0.5 - 1.5])
+strain.apply_translation([0.0, 0.0, BODY[2] + STRAIN[2] * 0.5 - 1.0])
 
-tongue = trimesh.creation.box(extents=TONGUE)
-tongue.apply_translation([0.0, 0.0, -TONGUE[2] * 0.5 + 1.0])
+pin_l = trimesh.creation.cylinder(radius=PIN_R, height=PIN_L, sections=32)
+pin_l.apply_translation([-PIN_DX, 0.0, -PIN_L * 0.5 + 0.6])
 
-plug = trimesh.boolean.union([body, strain, tongue])
+pin_r = trimesh.creation.cylinder(radius=PIN_R, height=PIN_L, sections=32)
+pin_r.apply_translation([PIN_DX, 0.0, -PIN_L * 0.5 + 0.6])
+
+plug = trimesh.boolean.union([body, strain, pin_l, pin_r])
 plug.apply_translation(-plug.bounds.mean(axis=0))
 plug.apply_scale(0.001)
 plug.export(out)

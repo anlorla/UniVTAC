@@ -9,9 +9,9 @@ render_frequency: 0   # headless 采集
 random_texture: false
 
 use_seed: true
-episode_num: 10       # 采 10 条成功数据
-start_seed: 0
-max_seed: 60          # 抓取偶有失败, 多给些 seed 凑够 10 条
+episode_num: 100      # 采 100 条成功数据
+start_seed: -1        # -1 = auto-resume from suc_map.txt
+max_seed: -1          # 抓取偶有失败, 不限 seed 直到凑够 100 条
 
 sensor_type: gsmini
 

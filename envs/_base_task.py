@@ -277,6 +277,17 @@ class BaseTask(UipcRLEnv):
 
         if cfg.adaptive_grasp_depth_threshold is None:
             cfg.adaptive_grasp_depth_threshold = cfg.robot.adaptive_grasp_depth_threshold
+
+        # UNIVTAC_NO_TACTILE=1: motion-test mode. Drop the GelSight gelpads (high-res UIPC soft
+        # bodies whose contact solve dominates per-step cost) + tactile image sim, so the scripted
+        # motion / motion planner can be iterated fast. NOTE: with no gelpad contact the gripper
+        # can't physically hold a UIPC object — tasks must weld() held objects in this mode
+        # (check self.no_tactile). Use a normal run (without this var) for real tactile data.
+        self.no_tactile = os.environ.get('UNIVTAC_NO_TACTILE', '0') == '1'
+        if self.no_tactile:
+            cfg.robot.tactiles = []
+            if cfg.dual_arm and cfg.robot_b is not None:
+                cfg.robot_b.tactiles = []
         return cfg
  
     def _setup_save(self):

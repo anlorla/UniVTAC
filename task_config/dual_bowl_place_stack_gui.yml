@@ -4,14 +4,14 @@ decimation: 1
 
 save_frequency: 2
 video_frequency: 2
-render_frequency: 0
+render_frequency: 1
 
 random_texture: false
 
 use_seed: true
-episode_num: 10
+episode_num: 1
 start_seed: 0
-max_seed: 20
+max_seed: 0
 
 sensor_type: gsmini
 
