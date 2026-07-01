@@ -84,6 +84,7 @@ class Task(BaseTask):
         self.delay(10)
         self.start_ee_z = self._robot_manager.get_ee_pose()[2]
         self.max_pressure_seen = 0.0
+        self.grasp_ee_z = None   # 每局重置抓取点高度(eval 首次夹住时在 check_success 里记录)
 
     def _play_once(self):
         # 张爪开到最大(夹的是长度方向, 跨度大)
@@ -115,8 +116,15 @@ class Task(BaseTask):
     def check_success(self):
         p = self._pressure()
         ee_z = self._robot_manager.get_ee_pose()[2]
+        # eval 时不跑 _play_once/_track: check_success 每步都调, 在此累计最大压入量(恢复夹碎检测)
+        self.max_pressure_seen = max(self.max_pressure_seen, p)
         self.metadata['max_pressure_mm'] = self.max_pressure_seen
         held = p > HOLD_PRESSURE                              # 还夹着(没掉)
         not_crushed = self.max_pressure_seen <= MAX_PRESSURE  # 全程没夹碎
+        # eval 无专家 grasp 阶段设 grasp_ee_z: 首次夹住(p>HOLD)时记录抓取点高度(≈下扎最低点), 之后判是否升起
+        if getattr(self, 'grasp_ee_z', None) is None:
+            if held:
+                self.grasp_ee_z = ee_z
+            return False                                      # 还没夹住 => 尚未成功
         lifted = (ee_z - self.grasp_ee_z) > LIFT * 0.7        # 从抓取点升起来了(不跟 home 比)
         return held and not_crushed and lifted
