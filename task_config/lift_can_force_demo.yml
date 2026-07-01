@@ -1,0 +1,24 @@
+decimation: 1
+episode_num: 1
+save_dir: ./data_force
+save_frequency: 2
+video_frequency: 2
+render_frequency: 0
+random_texture: false
+use_seed: true
+sensor_type: gsmini
+dense_gelpad: true
+observations:
+  actor: true
+  camera:
+  - rgb
+  embodiment:
+  - joint
+  - ee
+  tactile:
+  - rgb
+  - rgb_marker
+  - depth
+  - vertex_force
+  - force_field
+  - contact_force

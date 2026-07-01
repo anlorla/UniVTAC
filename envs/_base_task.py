@@ -734,6 +734,13 @@ class BaseTask(UipcRLEnv):
     def save_to_hdf5(self):
         self.save_path.parent.mkdir(parents=True, exist_ok=True)
         HDF5Handler().pkls_to_hdf5(self.tmp_save_dir, self.save_path)
+        # [PATCH-E] dump the (mesh-fixed) grid<->surface binding once, so the dense force_field can
+        # be rebuilt offline from the stored per-vertex `vertex_force` (see docs/ForceField.md).
+        if 'vertex_force' in self.cfg.obs_data_type.get('tactile', []):
+            try:
+                self._tactile_manager.dump_force_field_meta(self.save_root)
+            except Exception as e:
+                print(f"[force_field_meta] dump failed: {e}")
     
     def _save_metadata(self):
         if self.metadata_path.exists():

@@ -1,0 +1,21 @@
+decimation: 1
+episode_num: 50
+save_dir: ./data
+save_frequency: 2
+video_frequency: 0
+render_frequency: 0
+random_texture: false
+use_seed: true
+sensor_type: gsmini
+dense_gelpad: true          # 615-node gelpad (option B)
+observations:
+  actor: true
+  camera:
+  - rgb
+  embodiment:
+  - joint
+  - ee
+  tactile:
+  - rgb_marker              # gel visuo-tactile image
+  - depth
+  - vertex_force            # per-vertex contact force (sensor frame, lossless) -> offline force_field

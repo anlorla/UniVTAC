@@ -348,7 +348,36 @@ class VisualTactileSensor:
                 obs['force_field'] = self.get_force_field()
             elif data_type == 'force_field_img':
                 obs['force_field_img'] = self.get_force_field_image()
+            elif data_type == 'vertex_force':
+                obs['vertex_force'] = self.get_vertex_force()
         return obs
+
+    def get_vertex_force(self, in_sensor_frame: bool = True):
+        """[PATCH-E] Per-vertex contact force `(N_v, 3)` in the SENSOR frame (xy = shear, z = normal),
+        default. This is the raw, lossless force signal to STORE during collection; the dense
+        `force_field` grid is then reconstructed OFFLINE from it (see
+        scripts/asset_tools/contact_force_to_field.py). Rotating per-vertex to the sensor frame here
+        lets the offline step be a pure barycentric interpolation (no per-frame rotation needed),
+        since rotation is linear and commutes with the interpolation weighted-sum.
+        """
+        f = self._get_contact_force()                       # (N_v, 3) world frame
+        if in_sensor_frame:
+            f = f @ self._world_to_sensor_rot().to(f.dtype)  # -> sensor frame
+        return f
+
+    def dump_force_field_meta(self, path, grid=(64, 48)):
+        """[PATCH-E] Dump the (mesh-fixed) grid<->surface barycentric binding so the dense
+        `force_field` can be rebuilt offline from `vertex_force`. Written once per run per gel."""
+        if getattr(self, "_ff_grid", None) != (int(grid[0]), int(grid[1])):
+            self._precompute_force_field_map(grid)
+        np.savez(
+            str(path),
+            ff_verts=self._ff_verts.cpu().numpy(),        # (H*W, 3) surface-local vertex indices
+            ff_bary=self._ff_bary.cpu().numpy(),          # (H*W, 3) barycentric weights
+            ff_valid=self._ff_valid.cpu().numpy(),        # (H*W, 1) 1 inside surface hull else 0
+            surf_global=self._mf_surf_global.cpu().numpy(),  # nodal->surface index map
+            grid=np.array(self._ff_grid, dtype=np.int64),    # (W, H)
+        )
 
     def _get_contact_force(self):
         """[PATCH-A] per-vertex physical contact force (N_v,3) world frame, sparse (contact verts nonzero),
@@ -668,6 +697,14 @@ class TactileManager:
         for name, tact in self.tactiles.items():
             obs[name] = tact.get_observations(data_types)
         return obs
+
+    def dump_force_field_meta(self, save_dir, grid=(64, 48)):
+        """[PATCH-E] Write each gel's grid<->mesh binding to <save_dir>/ff_meta_<gel>.npz so the
+        dense force_field can be rebuilt offline from the stored per-vertex `vertex_force`."""
+        from pathlib import Path
+        save_dir = Path(save_dir); save_dir.mkdir(parents=True, exist_ok=True)
+        for name, tact in self.tactiles.items():
+            tact.dump_force_field_meta(save_dir / f"ff_meta_{name}.npz", grid=grid)
 
     def get_min_depth(self):
         self.task._update_render()
