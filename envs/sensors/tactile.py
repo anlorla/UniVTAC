@@ -284,7 +284,41 @@ class VisualTactileSensor:
         self.attach_to_init = np.linalg.inv(init_trans)
         self.attach_to_init = torch.tensor(self.attach_to_init, dtype=torch.float64, device=self.device)
 
+        self._fix_dynamic_surface_binding()
         self.sensor.marker_motion_simulator.marker_motion_sim.init_vertices()
+
+    def _fix_dynamic_surface_binding(self):
+        """[PATCH-F] The dynamic get_gelpad_info picks the sensing surface by WORLD-frame z, which is
+        wrong for arbitrary gripper orientations (it misses the actual contact face -> zero/attenuated
+        force_field). Re-classify surface (sensing) / bottom (attach) in the gel's LOCAL frame, which is
+        pose-independent. Only runs on the dynamic path (dense gelpad, sensor_type='gsmini_dyn'); the
+        hardcoded gsmini path is already correct and skipped."""
+        mm = self.sensor.marker_motion_simulator.marker_motion_sim
+        try:
+            from tacex.simulation_approaches.fem_based.sim.gelpad_info import get_gelpad_info, CONSTRAIN_PTS
+        except Exception:
+            return
+        if getattr(mm, "sensor_type", None) in CONSTRAIN_PTS:
+            return
+        info = get_gelpad_info(self.gelpad.uipc_meshes[0])
+        faces = np.asarray(info["mesh"]["faces"])                 # all surface triangles (nodal indices)
+        world = self.gelpad._data.nodal_pos_w.cpu().numpy()       # (N_v,3) world, undeformed at setup
+        Tw = self.gelpad.init_world_transform.cpu().numpy()       # 4x4 local->world
+        local = (world - Tw[:3, 3]) @ Tw[:3, :3]                  # world -> local (same as origin_pts)
+        lz = local[:, 2]
+        fz = lz[faces]                                            # (F,3) local z of each face's verts
+        tol = 2e-3
+        top = faces[np.all(fz >= lz.max() - tol, axis=1)]        # sensing face
+        bot = faces[np.all(fz <= lz.min() + tol, axis=1)]        # attach (constrained) face
+        if len(top) == 0 or len(bot) == 0:
+            print(f"[PATCH-F] degenerate surface (top={len(top)} bot={len(bot)}); keeping dynamic result")
+            return
+        mm.faces_on_surfaces = top.astype(np.int32)
+        mm.vertices_on_surface = np.sort(np.unique(top))
+        mm.constrain_ids = np.unique(bot)
+        mm.init_surface_vertices = mm.get_surface_vertices_world()
+        print(f"[PATCH-F] local-frame surface fix: surface_verts={len(mm.vertices_on_surface)} "
+              f"constrain_verts={len(mm.constrain_ids)}")
 
     def get_attach_pose(self):
         if type(self.attachment.isaaclab_rigid_object) is Articulation:
