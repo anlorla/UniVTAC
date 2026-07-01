@@ -332,6 +332,28 @@ class BaseTask(UipcRLEnv):
         self.create_actors()
 
         # add sensors
+        # ★ 辅助全局第三人称视角(仅渲染进视频, 不进 policy obs / 不发 server): env UNIVTAC_AUX_VIEW=1
+        #   look-at 计算朝向; eye/target 可用 UNIVTAC_AUX_EYE / UNIVTAC_AUX_TGT (x,y,z) 覆盖.
+        if os.environ.get('UNIVTAC_AUX_VIEW', '0') == '1':
+            import numpy as _np
+            from scipy.spatial.transform import Rotation as _Rot
+            _eye = _np.array([float(v) for v in os.environ.get('UNIVTAC_AUX_EYE', '1.6,1.3,0.95').split(',')])
+            _tgt = _np.array([float(v) for v in os.environ.get('UNIVTAC_AUX_TGT', '0.45,0.0,0.05').split(',')])
+            _z = _eye - _tgt; _z = _z / (_np.linalg.norm(_z) + 1e-9)
+            _x = _np.cross(_np.array([0.0, 0.0, 1.0]), _z); _x = _x / (_np.linalg.norm(_x) + 1e-9)
+            _y = _np.cross(_z, _x)
+            _q = _Rot.from_matrix(_np.stack([_x, _y, _z], axis=1)).as_quat()  # xyzw
+            _aux = CameraCfg(
+                name='global', prim_path='/World/envs/env_.*/GlobalAuxCam',
+                offset=CameraCfg.OffsetCfg(pos=tuple(float(v) for v in _eye),
+                                           rot=(float(_q[3]), float(_q[0]), float(_q[1]), float(_q[2])),
+                                           convention='opengl'),
+                data_types=['rgb'],
+                spawn=sim_utils.PinholeCameraCfg(focal_length=1.6, focus_distance=1.0,
+                                                 horizontal_aperture=3.2, clipping_range=(0.01, 100.0)),
+                width=480, height=270, update_period=1/120)
+            self.cfg.cameras = list(self.cfg.cameras) + [_aux]
+            self.cfg.video_size = (1280, 560)
         self._camera_manager = CameraManager(self.cfg.cameras, self)
         self._tactile_manager = TactileManager(self.cfg.robot.tactiles, self)
         if self.cfg.dual_arm:
@@ -545,7 +567,7 @@ class BaseTask(UipcRLEnv):
                 obs['tactile'][name]['rgb_marker'].clone().permute(2, 0, 1)).permute(1, 2, 0)
 
         # 相机面板: head + 所有腕相机(单臂 1 个 wrist, 双臂 wrist + wrist_b)
-        cam_names = [n for n in ['head', 'wrist', 'wrist_b']
+        cam_names = [n for n in ['head', 'wrist', 'wrist_b', 'global']
                      if n in obs['observation'] and 'rgb' in obs['observation'][n]]
         # 触觉: 单臂 2(left/right), 双臂 4(再加 *_b); 每列上下两个
         tac_names = [n for n in ['left_tactile', 'right_tactile', 'left_tactile_b', 'right_tactile_b']
