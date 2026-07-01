@@ -7,7 +7,8 @@ render_frequency: 0
 random_texture: false
 use_seed: true
 sensor_type: gsmini
-dense_gelpad: true          # 615-node gelpad (option B)
+dense_gelpad: true          # 615-node gelpad (option B); false=169
+force_field_grid: [64, 48]  # output grid (W,H); ~mesh-level e.g. [16,12] is enough for learning
 observations:
   actor: true
   camera:

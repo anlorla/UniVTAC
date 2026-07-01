@@ -12,7 +12,7 @@
 |---|---|---|---|
 | `contact_force` | `(T, N_v, 3)` | 逐顶点接触力,**世界系**(UIPC 求解器原始输出,稀疏) | 否(原始) |
 | `vertex_force` | `(T, N_v, 3)` | 逐顶点接触力,**传感器系**(xy=剪切, z=法向)。**采集就存这个** | 否(原始) |
-| `force_field` | `(T, 48, 64, 3)` | 稠密 `64×48×3` 力场,把逐顶点力**重心插值**到规则栅格,传感器系 | 是 |
+| `force_field` | `(T, H, W, 3)` | 稠密力场(默认 `48×64`),把逐顶点力**重心插值**到规则栅格,传感器系 | 是 |
 | `marker_force` | `(T, 63, 3)` | 9×7 marker 栅格的力,传感器系 | 是 |
 
 - `N_v` = gel 网格顶点数:粗网格 **169**,密网格(方案 B)**615**。
@@ -26,7 +26,8 @@
 
 ```yaml
 sensor_type: gsmini
-dense_gelpad: false        # false=粗网格169; true=密网格615(方案 B, 更高保真, 约2.6x慢)
+dense_gelpad: false        # 网格密度: false=粗169(快,mesh级); true=密615(方案B,~1.8x保真,~2.6x慢)
+force_field_grid: [64, 48] # 力场栅格 (W,H): 64x48 冗余大; 建议 ~mesh级如 [16,12](真信息一样,更好学)
 observations:
   tactile:
     - rgb_marker           # gel 视触觉图
@@ -34,14 +35,24 @@ observations:
     - vertex_force         # ← 逐顶点接触力(传感器系, 无损)
 ```
 
+**两个权衡开关**(见第 5 节):
+- `dense_gelpad`:网格密度 = 真实分辨率(粗 169 / 密 615)。
+- `force_field_grid`:输出栅格 `(W,H)`。只影响"表示形状",不增真信息;也是离线重建的默认栅格。可留 `[64,48]` 但离线随时能换(`--grid`)。
+
 跑采集(节点 `.56` 用二进制 Isaac,需先 source):
 
 ```bash
 source ~/miniconda3/etc/profile.d/conda.sh && conda activate UniVTAC
 source ~/yifan/isaacsim/setup_conda_env.sh
 export HEADLESS=1
-python scripts/collect_data.py <task> collect_force --episode_num 50 --gpu 0
+python scripts/collect_data.py <task_name> collect_force --episode_num 50 --gpu 0
 ```
+
+### task_name 在哪 / 采集逻辑改哪里
+
+- **`<task_name>` = `envs/` 下的任务文件名(去掉 `.py`)**。例如 `lift_can` ↔ `envs/lift_can.py`,`insert_hole` ↔ `envs/insert_hole.py`。当前可选:`collect, grasp_classify, grasp_chip, insert_HDMI, insert_hole, insert_tube, insert_USB, lift_bottle, lift_can, pull_out_key, put_bottle_in_shelf, pour_ball, phone_socket_replug, dual_*`(`dual_*` 为双臂)。
+- **命令第 2 个参数是 `task_config/` 下的 yaml 名**(去掉 `.yml`)。所以 `... lift_can collect_force ...` = 用 `envs/lift_can.py` 的任务逻辑 + `task_config/collect_force.yml` 的观测/开关配置。
+- **要改"采集时某个任务怎么动/存什么",就改对应的 `envs/<task_name>.py`**(动作序列、抓取判定、actor 布置等),观测/力表征相关的逻辑在 `envs/sensors/tactile.py`,基类流程(存盘、渲染、force_field_meta 落盘)在 `envs/_base_task.py`。
 
 采集会在运行目录写:
 ```
@@ -64,10 +75,12 @@ python scripts/collect_data.py <task> collect_force --episode_num 50 --gpu 0
 python scripts/asset_tools/contact_force_to_field.py <save_dir>/<task>/collect_force
 # 或单个文件:
 python scripts/asset_tools/contact_force_to_field.py path/to/0.hdf5
-# 可选: --out-key <名字>(默认写成 force_field), --meta-dir <ff_meta所在目录>
+# 换栅格分辨率(不用重跑仿真, 从参考表面重建绑定):
+python scripts/asset_tools/contact_force_to_field.py path/to/0.hdf5 --grid 16 12
+# 可选: --out-key <名字>(默认 force_field), --meta-dir <ff_meta所在目录>
 ```
 
-完成后每个 hdf5 的 `tactile/<gel>/` 下会多出 `force_field`,形状 `(T, 48, 64, 3)`。
+完成后每个 hdf5 的 `tactile/<gel>/` 下会多出 `force_field`,形状 `(T, H, W, 3)`(默认 `(T,48,64,3)`;`--grid 16 12` 则 `(T,12,16,3)`)。**同一份 `vertex_force` 可离线出任意栅格**,想换分辨率随时重跑,不用重新采集。
 
 **它和在环算的完全一致**(逐元素误差 ~1e-10,已验证)。原理:`force_field = 逐顶点力 的重心插值到 64×48 栅格`;因为存的是传感器系的 `vertex_force`,离线只需插值、无需再旋转(旋转与加权和可交换)。
 
@@ -90,16 +103,24 @@ vf = f["tactile/left_tactile/vertex_force"][:]  # (T, N_v, 3) 原始逐顶点力
 
 ## 5. 保真度与网格选择(重要)
 
-`force_field` 那张 64×48 **始终是插值**,保真度只取决于**网格密度**:
+有**两个独立开关**,别混:
 
-| 网格 | `dense_gelpad` | 峰值真实接触顶点 | 每步开销 | force_field |
-|---|---|---|---|---|
-| 粗 169 | `false` | ~40 | 1× | 正确,mesh 级分辨率 |
-| 密 615(方案 B) | `true` | ~74(≈1.8×) | ~2.6× | 正确,更高保真 |
+**(a) `dense_gelpad` = 网格密度 = 真实分辨率(唯一真正增信息的杠杆)**
 
-- 64×48 = 3072 格,远密于网格顶点,所以**大部分是上采样**;密网格(615)提供约 2× 真实样本,让同一张 64×48 更实。
-- 想"填满"64×48 到无损需要网格≈栅格(约 3000 顶面顶点),代价极高、不现实。详见 `docs/`(映射与保真度分析)/桌面 PDF。
-- 密网格需先生成资产:`python scripts/asset_tools/make_dense_gelpad.py`(一次性,见脚本头注释)。
+| 网格 | `dense_gelpad` | 峰值真实接触顶点 | 每步开销 |
+|---|---|---|---|
+| 粗 169 | `false` | ~40 | 1× |
+| 密 615(方案 B) | `true` | ~74(≈1.8×) | ~2.6× |
+
+**(b) `force_field_grid` = 输出栅格 `(W,H)` = 表示形状(不增真信息)**
+
+`force_field` **始终是逐顶点力的重心插值**,给定网格,插值已是最优重建。`64×48 = 3072` 格远密于网格顶点(密网格有效分辨率也才 ~9–14),所以 **64×48 大部分是上采样/零,对学习是冗余**。
+
+**建议:**
+- **要更真** → 开 `dense_gelpad: true`(网格密度),不是调大栅格。
+- **喂网络学习** → `force_field_grid` 用 **~mesh 级(如 `[16,12]`)**:真信息一样、冗余小、更好学、更省;要 64×48 的形状,训练时或离线 `--grid` 再放大。**并且一定对 force 三通道逐通道标准化**(值 ~1e-4,量级本身无所谓)。
+- 想"填满" 64×48 到无损需网格≈栅格(~3000 顶面顶点),代价极高、不现实。详见桌面 PDF(映射与保真度分析)。
+- 密网格需先生成资产:`python scripts/asset_tools/make_dense_gelpad.py`(一次性)。密网格的表面提取已按 gel 局部系修正(PATCH-F);否则夹爪姿态一变 force_field 会是零。
 
 ---
 
@@ -114,6 +135,6 @@ vf = f["tactile/left_tactile/vertex_force"][:]  # (T, N_v, 3) 原始逐顶点力
 ```
 tactile/<gel>/vertex_force    (T, N_v, 3)   逐顶点力, 传感器系  ← 采集存这个
 tactile/<gel>/contact_force   (T, N_v, 3)   逐顶点力, 世界系(可选)
-tactile/<gel>/force_field     (T, 48,64,3)  稠密力场(离线生成或在环存)
+tactile/<gel>/force_field     (T, H, W, 3)  稠密力场(离线生成或在环存, 默认 48x64)
 <run>/ff_meta_<gel>.npz       栅格↔网格绑定(离线重建必需)
 ```

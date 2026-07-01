@@ -193,6 +193,11 @@ class BaseTaskCfg(DirectRLEnvCfg):
     # scripts/asset_tools/make_dense_gelpad.py.
     dense_gelpad: bool = False
 
+    # [PATCH-E] force_field grid resolution (W, H) for the tactile force representation.
+    # Higher (e.g. 64x48) = more redundant/upsampled; ~mesh-level (e.g. 16x12) carries the same
+    # real info with less redundancy. Also the default grid the offline reconstruction uses.
+    force_field_grid: tuple[int, int] = (64, 48)
+
     # 双臂: 开启后额外建第二条臂(arm B), 其 cfg 放在 robot_b。默认关闭, 单臂任务不受影响。
     dual_arm: bool = False
     robot_b: RobotCfg = None

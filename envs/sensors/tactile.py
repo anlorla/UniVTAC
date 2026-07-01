@@ -273,7 +273,12 @@ class VisualTactileSensor:
         )
         self.sensor = GelSightSensor(self.cfg.sensor_cfg, self.gelpad)
         # self.scene.sensors[f'tactile_{self.cfg.name}'] = self.sensor
-    
+
+        # [PATCH-E] force_field grid resolution (W, H). Set from the task config
+        # (force_field_grid) via TactileManager. Higher = denser but more redundant / upsampled;
+        # ~mesh-level (e.g. 16x12) carries the same real info with far less redundancy.
+        self.force_field_grid = (64, 48)
+
     def setup(self):
         self.device = self.uipc_sim.cfg.device
         init_pts = self.gelpad._data.nodal_pos_w[self.attachment.attachment_points_idx].cpu().numpy()
@@ -379,9 +384,9 @@ class VisualTactileSensor:
             elif data_type == 'marker_force_img':
                 obs['marker_force_img'] = self.get_marker_force_image(mode='interp')
             elif data_type == 'force_field':
-                obs['force_field'] = self.get_force_field()
+                obs['force_field'] = self.get_force_field(grid=self.force_field_grid)
             elif data_type == 'force_field_img':
-                obs['force_field_img'] = self.get_force_field_image()
+                obs['force_field_img'] = self.get_force_field_image(grid=self.force_field_grid)
             elif data_type == 'vertex_force':
                 obs['vertex_force'] = self.get_vertex_force()
         return obs
@@ -399,18 +404,24 @@ class VisualTactileSensor:
             f = f @ self._world_to_sensor_rot().to(f.dtype)  # -> sensor frame
         return f
 
-    def dump_force_field_meta(self, path, grid=(64, 48)):
-        """[PATCH-E] Dump the (mesh-fixed) grid<->surface barycentric binding so the dense
-        `force_field` can be rebuilt offline from `vertex_force`. Written once per run per gel."""
+    def dump_force_field_meta(self, path, grid=None):
+        """[PATCH-E] Dump the (mesh-fixed) binding so the force_field can be rebuilt offline from
+        `vertex_force`. Written once per run per gel. Stores the default-grid barycentric binding
+        AND the reference surface xy, so the offline script can also rebuild at ANY --grid."""
+        if grid is None:
+            grid = self.force_field_grid
         if getattr(self, "_ff_grid", None) != (int(grid[0]), int(grid[1])):
             self._precompute_force_field_map(grid)
+        mm = self.sensor.marker_motion_simulator.marker_motion_sim
+        surf_ref_xy = mm.init_surface_vertices_camera[:, :2].cpu().numpy()  # reference surface xy
         np.savez(
             str(path),
             ff_verts=self._ff_verts.cpu().numpy(),        # (H*W, 3) surface-local vertex indices
             ff_bary=self._ff_bary.cpu().numpy(),          # (H*W, 3) barycentric weights
             ff_valid=self._ff_valid.cpu().numpy(),        # (H*W, 1) 1 inside surface hull else 0
             surf_global=self._mf_surf_global.cpu().numpy(),  # nodal->surface index map
-            grid=np.array(self._ff_grid, dtype=np.int64),    # (W, H)
+            grid=np.array(self._ff_grid, dtype=np.int64),    # default (W, H)
+            surf_ref_xy=surf_ref_xy,                          # (N_surf, 2) for offline --grid rebuild
         )
 
     def _get_contact_force(self):
@@ -716,6 +727,10 @@ class TactileManager:
                 cfg.name, cfg, self.robot, self.scene, self.uipc_sim
             ) for cfg in cfg_list
         }
+        # [PATCH-E] force_field grid from the task config (default 64x48)
+        grid = tuple(getattr(task.cfg, "force_field_grid", (64, 48)))
+        for tact in self.tactiles.values():
+            tact.force_field_grid = grid
 
     def update(self, dt, force_recompute=False):
         for tact in self.tactiles.values():
@@ -732,9 +747,10 @@ class TactileManager:
             obs[name] = tact.get_observations(data_types)
         return obs
 
-    def dump_force_field_meta(self, save_dir, grid=(64, 48)):
+    def dump_force_field_meta(self, save_dir, grid=None):
         """[PATCH-E] Write each gel's grid<->mesh binding to <save_dir>/ff_meta_<gel>.npz so the
-        dense force_field can be rebuilt offline from the stored per-vertex `vertex_force`."""
+        force_field can be rebuilt offline from the stored per-vertex `vertex_force`. Uses each
+        gel's configured force_field_grid unless `grid` is given."""
         from pathlib import Path
         save_dir = Path(save_dir); save_dir.mkdir(parents=True, exist_ok=True)
         for name, tact in self.tactiles.items():
