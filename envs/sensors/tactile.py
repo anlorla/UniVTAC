@@ -389,6 +389,8 @@ class VisualTactileSensor:
                 obs['force_field_img'] = self.get_force_field_image(grid=self.force_field_grid)
             elif data_type == 'vertex_force':
                 obs['vertex_force'] = self.get_vertex_force()
+            elif data_type == 'gel_particle':
+                obs['gel_particle'] = self.get_gel_particle_image()
         return obs
 
     def get_vertex_force(self, in_sensor_frame: bool = True):
@@ -706,6 +708,97 @@ class VisualTactileSensor:
                 cv2.arrowedLine(img, (u, v), (u + du, v + dv),
                                 (255, 255, 255), 1, line_type=cv2.LINE_AA, tipLength=0.3)
         return torch.as_tensor(img, dtype=torch.uint8, device=self.device)
+
+    def _init_dense_particles(self, grid=(52, 40), seed=0):
+        """[PATCH-G] Bind a dense particle field to the gel SURFACE MESH via the same barycentric
+        binding the markers use (_gen_marker_weight). Their per-particle uv displacement (deformed -
+        rest) drives a normalized-convolution displacement field that advects a full-frame speckle
+        coating -> a marker-free silver "gel + force" image whose motion is the GENUINE FEM surface
+        deformation (not a force-field proxy). Also builds the static coating + gray grain."""
+        import cv2
+        mm = self.sensor.marker_motion_simulator.marker_motion_sim
+        surf = mm.init_surface_vertices_camera[:, :2].detach().cpu().numpy()
+        (xmin, ymin), (xmax, ymax) = surf.min(0), surf.max(0)
+        px, py = 0.03 * (xmax - xmin), 0.03 * (ymax - ymin)
+        GX, GY = np.meshgrid(np.linspace(xmin + px, xmax - px, grid[0]),
+                             np.linspace(ymin + py, ymax - py, grid[1]))
+        pts = np.stack([GX.ravel(), GY.ravel()], axis=1)
+        self._pp_idx, w = mm._gen_marker_weight(pts)          # bind valid particles to triangles
+        self._pp_w = np.asarray(w, np.float32)
+        self._pp_grid = tuple(grid)
+        # rest uv of every bound particle (from the undeformed surface)
+        init3d = mm.init_surface_vertices_camera.detach().cpu().numpy()
+        rest_pts = (init3d[self._pp_idx] * self._pp_w[..., None]).sum(1).astype(np.float32)
+        self._pp_uv0 = np.asarray(mm.gen_marker_uv(rest_pts), np.float32)               # (N,2)
+        # --- full-frame fine multicolor speckle coating (alpha-composited -> keeps hue) ---
+        H = self.sensor.camera_cfg.height; W = self.sensor.camera_cfg.width
+        rs = np.random.RandomState(seed); n = int(0.09 * H * W)
+        xs = rs.uniform(0, W, n); ys = rs.uniform(0, H, n)
+        hue = rs.uniform(0, 180, n).astype(np.uint8); sat = rs.uniform(120, 210, n).astype(np.uint8)
+        val = rs.uniform(200, 255, n).astype(np.uint8)
+        cols = cv2.cvtColor(np.stack([hue, sat, val], 1)[None], cv2.COLOR_HSV2RGB)[0].astype(np.float32)
+        coat = np.zeros((H, W, 3), np.float32); calpha = np.zeros((H, W), np.float32)
+        for x, y, c, a in zip(xs, ys, cols, rs.uniform(0.6, 1.0, n)):
+            cv2.circle(coat, (int(x), int(y)), 1, c.tolist(), -1, cv2.LINE_AA)
+            cv2.circle(calpha, (int(x), int(y)), 1, float(a), -1, cv2.LINE_AA)
+        self._pp_coat = cv2.GaussianBlur(coat, (0, 0), 0.5)
+        self._pp_calpha = cv2.GaussianBlur(calpha, (0, 0), 0.5)
+        gr = np.random.RandomState(seed + 1).randn(H, W).astype(np.float32)             # GRAY grain
+        self._pp_grain = cv2.GaussianBlur(gr, (0, 0), 0.7); self._pp_grain /= self._pp_grain.std() + 1e-6
+        self._pp_mesh = np.stack(np.meshgrid(np.arange(W), np.arange(H)), 0).astype(np.float32)  # (2,H,W)
+
+    def get_gel_particle_image(self, grid=(52, 40)):
+        """[PATCH-G] Markerless silver "gel + force" image: bright silver-gray base (from the Taxim
+        luminance, so the real contact blob shows), gray gaussian noise, and a full-frame colored
+        speckle coating advected by the GENUINE per-particle FEM surface displacement (mesh-bound).
+        Returns (H, W, 3) uint8 RGB."""
+        import cv2, os
+        mm = self.sensor.marker_motion_simulator.marker_motion_sim
+        if getattr(self, "_pp_grid", None) != tuple(grid):
+            self._init_dense_particles(grid)
+        # --- current particle uv from the DEFORMED mesh; displacement = curr - rest (rigid removed) ---
+        curr = mm.get_surface_vertices_camera().detach().cpu().numpy()
+        pts = (curr[self._pp_idx] * self._pp_w[..., None]).sum(1).astype(np.float32)   # (N,3)
+        mean_motion = np.mean(mm.get_vertices_camera()[mm.constrain_ids].detach().cpu().numpy()
+                              - mm.constrain_pts, axis=0)
+        pts[:, :2] -= mean_motion[:2]                                                  # drop rigid motion
+        uv = np.asarray(mm.gen_marker_uv(pts), np.float32)                             # (N,2) pixels
+        disp = uv - self._pp_uv0                                                       # true FEM uv displacement
+        # --- scatter particle displacement -> smooth dense field (normalized convolution) ---
+        rgb = self.sensor.data.output['tactile_rgb'].squeeze(0).detach().cpu().numpy().astype(np.float32)
+        H, W = rgb.shape[:2]; s = 8; dh, dw = H // s, W // s
+        accx = np.zeros((dh, dw), np.float32); accy = np.zeros((dh, dw), np.float32); cnt = np.zeros((dh, dw), np.float32)
+        xi = np.clip((self._pp_uv0[:, 0] / s).astype(int), 0, dw - 1)                  # bin at REST uv (stable support)
+        yi = np.clip((self._pp_uv0[:, 1] / s).astype(int), 0, dh - 1)
+        np.add.at(accx, (yi, xi), disp[:, 0]); np.add.at(accy, (yi, xi), disp[:, 1]); np.add.at(cnt, (yi, xi), 1.0)
+        wcnt = cv2.GaussianBlur(cnt, (0, 0), 3.0) + 1e-3
+        DX = cv2.resize(cv2.GaussianBlur(accx, (0, 0), 3.0) / wcnt, (W, H), interpolation=cv2.INTER_LINEAR)
+        DY = cv2.resize(cv2.GaussianBlur(accy, (0, 0), 3.0) / wcnt, (W, H), interpolation=cv2.INTER_LINEAR)
+        # --- bright silver-gray base from the Taxim luminance (keeps the real contact blob) ---
+        lum = cv2.GaussianBlur(rgb @ np.array([0.299, 0.587, 0.114], np.float32), (0, 0), 1.5)
+        g0 = np.clip(172.0 + (lum - lum.mean()) * 1.1, 128, 214)
+        gel = np.stack([g0 * 0.985, g0 * 1.0, g0 * 1.03], -1) + self._pp_grain[..., None] * 3.0
+        # --- advect the coating by the real displacement, alpha-composite (keeps hue) ---
+        mapx = (self._pp_mesh[0] - DX).astype(np.float32); mapy = (self._pp_mesh[1] - DY).astype(np.float32)
+        sp = cv2.remap(self._pp_coat, mapx, mapy, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+        al = cv2.remap(self._pp_calpha, mapx, mapy, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+        a = np.clip(al * 0.45, 0, 1)[..., None]
+        out = gel * (1.0 - a) + sp * a
+        shade = np.clip(cv2.GaussianBlur(np.hypot(DX, DY), (0, 0), 8) / 6.0, 0, 1)[..., None]  # contact depth
+        out = np.clip(out * (1.0 - 0.10 * shade), 0, 255).astype(np.uint8)
+        # [PATCH-G] optional PNG side-channel: dump each rendered frame straight to disk so the
+        # mesh-bound particle sequence survives even if the collect/hdf5 episode fails or Isaac
+        # hangs on shutdown. GELPART_DUMP=<dir> enables it; also dumps the raw Taxim gel for ref.
+        _dd = os.environ.get('GELPART_DUMP')
+        if _dd:
+            os.makedirs(os.path.join(_dd, 'gp'), exist_ok=True)
+            os.makedirs(os.path.join(_dd, 'rgb'), exist_ok=True)
+            n = getattr(self, '_pp_dump_n', 0)
+            cv2.imwrite(os.path.join(_dd, 'gp', f'{self.name}_{n:04d}.png'), cv2.cvtColor(out, cv2.COLOR_RGB2BGR))
+            cv2.imwrite(os.path.join(_dd, 'rgb', f'{self.name}_{n:04d}.png'),
+                        cv2.cvtColor(np.clip(rgb, 0, 255).astype(np.uint8), cv2.COLOR_RGB2BGR))
+            self._pp_dump_n = n + 1
+        return torch.as_tensor(out, dtype=torch.uint8, device=self.device)
 
     def _reset_idx(self):
         self.init_pose_mat = self.get_attach_pose().to_transformation_matrix()

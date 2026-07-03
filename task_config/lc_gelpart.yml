@@ -1,0 +1,22 @@
+decimation: 1
+episode_num: 1
+save_dir: ./data_force
+save_frequency: 2
+video_frequency: 999999   # must be >0 or save_freq is never true (see _base_task _step gating);
+                          # large value = enable saving WITHOUT engaging the video-write path
+render_frequency: 0
+random_texture: false
+use_seed: true
+sensor_type: gsmini
+dense_gelpad: false
+observations:
+  actor: true
+  camera:
+  - rgb
+  embodiment:
+  - joint
+  - ee
+  tactile:
+  - rgb
+  - gel_particle    # markerless silver "gel + force": mesh-bound speckle coating (PATCH-G)
+  - force_field
