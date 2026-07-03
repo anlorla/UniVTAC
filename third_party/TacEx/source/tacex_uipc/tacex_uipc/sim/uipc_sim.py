@@ -274,6 +274,27 @@ class UipcSim:
     def step(self, dt=0):
         self.world.advance()
         self.world.retrieve()
+        self._contact_grad_cache = None  # [PATCH-A] invalidate per step
+
+    def get_contact_gradient(self):
+        """[PATCH-A] current-step global contact gradient (idx, grad).
+        idx:(M,) int64 GlobalVertexManager indices; grad:(M,3) float64 world. force ~= -grad."""
+        import numpy as np
+        if getattr(self, "_contact_grad_cache", None) is not None:
+            return self._contact_grad_cache
+        from uipc.core import ContactSystemFeature
+        from uipc.geometry import Geometry
+        feat = self.world.features().find(ContactSystemFeature.FeatureName)
+        vg = Geometry()
+        feat.contact_gradient(vg)
+        inst = vg.instances()
+        if inst.size() == 0 or inst.find("i") is None:
+            idx, grad = np.zeros((0,), np.int64), np.zeros((0, 3), np.float64)
+        else:
+            idx = np.asarray(inst.find("i").view()).reshape(-1).astype(np.int64)
+            grad = np.asarray(inst.find("grad").view()).reshape(-1, 3).astype(np.float64)
+        self._contact_grad_cache = (idx, grad)
+        return self._contact_grad_cache
 
     def reset(self):
         # self.world.recover(0) # go back to frame 0
