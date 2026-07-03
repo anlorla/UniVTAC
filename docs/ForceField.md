@@ -2,6 +2,14 @@
 
 本文说明如何在采集时**只存无损的逐顶点接触力**,采集后**离线**算出稠密的 `64×48×3` 力场表征(`force_field`)。理念类似相机的 RAW → 冲洗:贵的仿真只跑一次,栅格表征随时离线重算。
 
+> **⚠️ 依赖(务必确认)**:所有力表征(`vertex_force` / `force_field` / `marker_force`)都调用
+> `UipcSim.get_contact_gradient()`(`envs/sensors/tactile.py:432`)。该方法定义在
+> `third_party/TacEx/source/tacex_uipc/tacex_uipc/sim/uipc_sim.py`(commit `ace4588` [PATCH-A])。
+> 它从 `ContactSystemFeature.contact_gradient` 输出的 Geometry 里取 `inst.find("i")`(顶点索引)、
+> `inst.find("grad")`(梯度),**逐顶点接触力 ≈ −grad**(世界系,GlobalVertexManager 索引)。
+> 若换新环境/新机器,请确认安装的 `tacex_uipc` 里有此方法(`python -c "from tacex_uipc.sim import UipcSim; print(hasattr(UipcSim,'get_contact_gradient'))"`);
+> 缺失会 AttributeError,而**猜错属性名会产出静默错误的力**。
+
 ---
 
 ## 1. 力表征有哪些
