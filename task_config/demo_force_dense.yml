@@ -27,3 +27,4 @@ save_frequency: 2
 sensor_type: gsmini
 use_seed: true
 video_frequency: 2
+dense_gelpad: true

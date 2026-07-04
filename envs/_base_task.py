@@ -188,6 +188,16 @@ class BaseTaskCfg(DirectRLEnvCfg):
     robot: RobotCfg = None
     tactile_sensor_type:Literal['gsmini', 'xensews', 'gf225'] = 'gsmini'
 
+    # [PATCH-D] opt-in denser gelpad FEM mesh (option B, gsmini only). Higher-resolution
+    # force field at the cost of a slower UIPC solve. Needs the dense USD generated via
+    # scripts/asset_tools/make_dense_gelpad.py.
+    dense_gelpad: bool = False
+
+    # [PATCH-E] force_field grid resolution (W, H) for the tactile force representation.
+    # Higher (e.g. 64x48) = more redundant/upsampled; ~mesh-level (e.g. 16x12) carries the same
+    # real info with less redundancy. Also the default grid the offline reconstruction uses.
+    force_field_grid: tuple[int, int] = (64, 48)
+
     # 双臂: 开启后额外建第二条臂(arm B), 其 cfg 放在 robot_b。默认关闭, 单臂任务不受影响。
     dual_arm: bool = False
     robot_b: RobotCfg = None
@@ -275,7 +285,7 @@ class BaseTask(UipcRLEnv):
                 raise ValueError('dual_arm 目前仅支持 tactile_sensor_type="gsmini"')
             cfg.robot, cfg.robot_b = create_franka_gsmini_gripper_dual(data_type=data_type)
         elif cfg.tactile_sensor_type == 'gsmini':
-            cfg.robot = create_franka_gsmini_gripper(data_type=data_type)
+            cfg.robot = create_franka_gsmini_gripper(data_type=data_type, dense_gelpad=cfg.dense_gelpad)
         elif cfg.tactile_sensor_type == 'gf225':
             cfg.robot = create_franka_gf225_gripper(data_type=data_type)
         elif cfg.tactile_sensor_type == 'xensews':
@@ -330,6 +340,28 @@ class BaseTask(UipcRLEnv):
         self.create_actors()
 
         # add sensors
+        # ★ 辅助全局第三人称视角(仅渲染进视频, 不进 policy obs / 不发 server): env UNIVTAC_AUX_VIEW=1
+        #   look-at 计算朝向; eye/target 可用 UNIVTAC_AUX_EYE / UNIVTAC_AUX_TGT (x,y,z) 覆盖.
+        if os.environ.get('UNIVTAC_AUX_VIEW', '0') == '1':
+            import numpy as _np
+            from scipy.spatial.transform import Rotation as _Rot
+            _eye = _np.array([float(v) for v in os.environ.get('UNIVTAC_AUX_EYE', '1.6,1.3,0.95').split(',')])
+            _tgt = _np.array([float(v) for v in os.environ.get('UNIVTAC_AUX_TGT', '0.45,0.0,0.05').split(',')])
+            _z = _eye - _tgt; _z = _z / (_np.linalg.norm(_z) + 1e-9)
+            _x = _np.cross(_np.array([0.0, 0.0, 1.0]), _z); _x = _x / (_np.linalg.norm(_x) + 1e-9)
+            _y = _np.cross(_z, _x)
+            _q = _Rot.from_matrix(_np.stack([_x, _y, _z], axis=1)).as_quat()  # xyzw
+            _aux = CameraCfg(
+                name='global', prim_path='/World/envs/env_.*/GlobalAuxCam',
+                offset=CameraCfg.OffsetCfg(pos=tuple(float(v) for v in _eye),
+                                           rot=(float(_q[3]), float(_q[0]), float(_q[1]), float(_q[2])),
+                                           convention='opengl'),
+                data_types=['rgb'],
+                spawn=sim_utils.PinholeCameraCfg(focal_length=1.6, focus_distance=1.0,
+                                                 horizontal_aperture=3.2, clipping_range=(0.01, 100.0)),
+                width=480, height=270, update_period=1/120)
+            self.cfg.cameras = list(self.cfg.cameras) + [_aux]
+            self.cfg.video_size = (1280, 560)
         self._camera_manager = CameraManager(self.cfg.cameras, self)
         self._tactile_manager = TactileManager(self.cfg.robot.tactiles, self)
         if self.cfg.dual_arm:
@@ -543,9 +575,9 @@ class BaseTask(UipcRLEnv):
                 obs['tactile'][name]['rgb_marker'].clone().permute(2, 0, 1)).permute(1, 2, 0)
 
         poster = os.environ.get('UNIVTAC_POSTER_VIEW', '0') == '1'
-        # 相机面板: 默认 head + 所有腕相机(单臂 wrist, 双臂 wrist + wrist_b);
+        # 相机面板: 默认 head + 所有腕相机(单臂 wrist, 双臂 wrist + wrist_b) + 可选 global 辅助视角;
         # 海报模式只保留第三视角(head)。
-        cam_order = ['head'] if poster else ['head', 'wrist', 'wrist_b']
+        cam_order = ['head'] if poster else ['head', 'wrist', 'wrist_b', 'global']
         cam_names = [n for n in cam_order
                      if n in obs['observation'] and 'rgb' in obs['observation'][n]]
         # 触觉: 单臂 2(left/right), 双臂 4(再加 *_b) —— 海报模式也全保留(双臂要两条臂的触觉)。
@@ -740,6 +772,13 @@ class BaseTask(UipcRLEnv):
     def save_to_hdf5(self):
         self.save_path.parent.mkdir(parents=True, exist_ok=True)
         HDF5Handler().pkls_to_hdf5(self.tmp_save_dir, self.save_path)
+        # [PATCH-E] dump the (mesh-fixed) grid<->surface binding once, so the dense force_field can
+        # be rebuilt offline from the stored per-vertex `vertex_force` (see docs/ForceField.md).
+        if 'vertex_force' in self.cfg.obs_data_type.get('tactile', []):
+            try:
+                self._tactile_manager.dump_force_field_meta(self.save_root)
+            except Exception as e:
+                print(f"[force_field_meta] dump failed: {e}")
     
     def _save_metadata(self):
         if self.metadata_path.exists():
