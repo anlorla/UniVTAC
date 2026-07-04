@@ -215,6 +215,14 @@ class BaseTask(UipcRLEnv):
         self.cfg = cfg
         self.render_outdated = True
 
+        # 海报模式(UNIVTAC_POSTER_VIEW=1): 帧只含第三视角(head)+ 触觉, 去掉腕相机。
+        # 触觉每列上下两个: 单臂 2 个 -> 1 列(160), 双臂 4 个 -> 2 列(320)。
+        # 帧宽 = 480(head) + 160*列数 -> 单臂 640, 双臂 800; 高 320。
+        # 同步把 video_size 改成该尺寸, 否则 VideoHandler 会拉伸帧造成变形。
+        if os.environ.get('UNIVTAC_POSTER_VIEW', '0') == '1':
+            cols = 2 if getattr(cfg, 'dual_arm', False) else 1
+            cfg.video_size = (480 + 160 * cols, 320)
+
         self._setup_save()
         self.rng = np.random.default_rng()
         super().__init__(cfg=cfg, render_mode=render_mode, **kwargs) # Full Render
@@ -534,10 +542,13 @@ class BaseTask(UipcRLEnv):
             return torchvision.transforms.Resize((tac_size, tac_size))(
                 obs['tactile'][name]['rgb_marker'].clone().permute(2, 0, 1)).permute(1, 2, 0)
 
-        # 相机面板: head + 所有腕相机(单臂 1 个 wrist, 双臂 wrist + wrist_b)
-        cam_names = [n for n in ['head', 'wrist', 'wrist_b']
+        poster = os.environ.get('UNIVTAC_POSTER_VIEW', '0') == '1'
+        # 相机面板: 默认 head + 所有腕相机(单臂 wrist, 双臂 wrist + wrist_b);
+        # 海报模式只保留第三视角(head)。
+        cam_order = ['head'] if poster else ['head', 'wrist', 'wrist_b']
+        cam_names = [n for n in cam_order
                      if n in obs['observation'] and 'rgb' in obs['observation'][n]]
-        # 触觉: 单臂 2(left/right), 双臂 4(再加 *_b); 每列上下两个
+        # 触觉: 单臂 2(left/right), 双臂 4(再加 *_b) —— 海报模式也全保留(双臂要两条臂的触觉)。
         tac_names = [n for n in ['left_tactile', 'right_tactile', 'left_tactile_b', 'right_tactile_b']
                      if n in obs['tactile']]
         n_cols = max(1, (len(tac_names) + 1) // 2)

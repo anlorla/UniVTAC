@@ -249,3 +249,88 @@ def check_early_stop(self):
 ```
 
 Keep both `check_success` and `check_early_stop` lightweight. They should only read the current simulation state and return a boolean value; they should not execute actions that modify the simulation state.
+
+## Dual-Arm Tasks
+
+Set `dual_arm = True` in `TaskCfg` to spawn a second arm (`/Robot_b` with its own `*_b` tactiles). The base task then exposes a parallel set of handles:
+
+- `self._robot_manager` / `self._robot_manager_b` — the two arm managers.
+- `self.atom_a` / `self.atom_b` — atomic-action factories bound to each arm.
+- Pass `arm="a"` or `arm="b"` to `self.move(...)`; both arms are stepped every frame (the idle arm holds its pose and grip).
+
+Add a `wrist_b` camera in `cameras` (mirroring `wrist`) so the second wrist view is recorded, and size `video_size` for the extra panels.
+
+```python
+@configclass
+class TaskCfg(BaseTaskCfg):
+    dual_arm = True
+    video_size = (1760, 320)   # head + wrist + wrist_b + 4 tactile columns
+```
+
+### Ignoring manipulated objects in the planner
+
+cuRobo plans against a collision world frozen inside `super().__init__()`. Any object that starts **at** a grasp/target pose (an in-hand part, a nested stack, a fixture you will pass through) must be ignored or `action 0` will report a collision and planning fails. Set the task-level ignore set **before** `super().__init__()`, then the per-arm runtime ignore sets after:
+
+```python
+def __init__(self, cfg, mode="collect", render_mode=None, **kwargs):
+    self.planner_ignore_actors = {"cup_a"}          # must be set before super().__init__
+    super().__init__(cfg, mode, render_mode, **kwargs)
+    self._robot_manager.ignore_actors = {"cup_a", "cup_b"}
+    self._robot_manager_b.ignore_actors = {"cup_a", "cup_b"}
+```
+
+Keep at least one non-ignored object (e.g. a heavy base/plate) so cuRobo does not hit its empty-world branch.
+
+## Advanced Grasp & Place Patterns
+
+These patterns come from the dual-arm pick-and-place tasks (`dual_cup_place_stack`, `dual_bowl_place_stack`, `dual_gear_holder`).
+
+**Rigid in-hand "weld".** For a reliable, slip-free carry, weld the object to the gripper after closing, then unweld before release. While welded the object's pose is set to `gripper_pose ∘ grasp_relative` every step:
+
+```python
+self.move(atom.close_gripper(0.0, depth_threshold=None), arm=arm)
+self.weld_actor(actor, rm)            # rigid follow, never slips
+...
+self._welds = [w for w in self._welds if w[0] is not actor]   # unweld
+self.move(atom.open_gripper(1.0), arm=arm)
+```
+
+**Rim grasp for wide objects.** When an object (bowl, plate) is wider than the gripper opening, do not grasp the center — register a `contact` point on **one side of the rim** (radial offset + a vertical offset just below the lip) so one finger lands inside and one outside the wall:
+
+```python
+gp = center.p + rim_dir * RIM_GRASP_R + [0, 0, RIM_GRASP_DZ]
+grasp_pose = construct_grasp_pose(gp, [0, 0, 1], [1, 0, 0])
+grasp_id = actor.register_point(grasp_pose, type="contact")
+```
+
+**In-hand placement (off-center grasp).** With a rim/off-center grasp the object is not at the gripper center, so capture the in-hand transform **once** and solve the gripper-center target from it — never re-read the object pose mid-place (a shifted object yields an unreachable target):
+
+```python
+inhand = actor.get_pose().rebase(rm.get_gripper_center_pose())
+gc_mat = target_pose.to_transformation_matrix() @ np.linalg.inv(inhand.to_transformation_matrix())
+ee = rm.gripper_center_to_ee(Pose.from_matrix(gc_mat))
+self.move(atom.move_to_pose(ee), arm=arm)
+```
+
+**Peg insertion / threading.** Approach a hover above the target, then descend straight down with `constraint_pose=[1, 1, 1, 1, 1, 0]` (only the gripper's local z is free). Because the holder/peg is in `ignore_actors`, the planner won't fail on contact and the object threads onto the peg via simulation. Release with the peg still engaged in the bore (a few mm above the seated height), not floating above the tip, so the object self-centers as it settles.
+
+**Manual fixed grip.** For rigid objects where adaptive tactile-depth grasping is unnecessary, set `use_adaptive_grasp = False` in `TaskCfg` and call `close_gripper(<fixed_pos>)` (e.g. `0.0` for full close, `0.5` for a gentler hold).
+
+## Long Multi-Stage Tasks: step & frame limits
+
+Each episode stops at `step_lim` steps, and saving stops once `save_count` exceeds `max_save_frames` (default `1000`) — past that, `plan_success` is forced `False` and the rest of the script is skipped. Multi-stage tasks (e.g. three pick-place cycles across two arms can run ~1500–1800 steps) silently get cut off. Raise both in `TaskCfg`:
+
+```python
+@configclass
+class TaskCfg(BaseTaskCfg):
+    step_lim = 2400
+    max_save_frames = 2000
+```
+
+## Recording figure / poster videos
+
+Set the `UNIVTAC_POSTER_VIEW=1` environment variable to compose each video frame from the **head (third-person) view + tactile views only**, dropping the wrist cameras. The frame and `video_size` are sized automatically (single-arm → `640x320`, dual-arm → `800x320`). Combine with `task_config/poster_record.yml` to record one clean success per task:
+
+```bash
+UNIVTAC_POSTER_VIEW=1 python scripts/collect_data.py <task_name> poster_record
+```

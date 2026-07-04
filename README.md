@@ -26,10 +26,18 @@ UniVTAC currently includes the following manipulation tasks, all featuring tacti
 | **Put Bottle in Shelf** | `put_bottle_in_shelf` | Place a bottle onto a shelf |
 | **Grasp & Classify** | `grasp_classify` | Grasp an object and classify it by tactile feedback |
 | **Grasp Chip** | `grasp_chip` | Grasp a fragile chip without crushing it (tactile force limit) |
+| **Pour Ball** | `pour_ball` | Grasp a cup and pour the balls inside it out onto a plate |
+| **Phone Socket Replug** | `phone_socket_replug` | Pull a phone connector out of its socket and plug it back in |
 | **Dual-Arm Screw & Sleeve** | `dual_screw_sleeve` | Dual-arm assembly: one arm holds the sleeve, the other inserts a screw into it |
 | **Dual-Arm Cup Stack** | `dual_cup_stack` | Dual-arm nesting: one arm holds the bottom cup, the other stacks a second cup into it |
+| **Dual-Arm Bowl Unstack** | `dual_bowl_unstack` | Dual-arm: grasp the top bowl of a nested pair by its rim, lift it out, and set it aside |
+| **Dual-Arm Gear Holder** | `dual_gear_holder` | Dual-arm: pick gears laid around a holder and thread each onto one of the holder's vertical pegs |
+| **Dual-Arm Bowl Place-Stack** | `dual_bowl_place_stack` | Dual-arm: bring two separated bowls together into a centered nested stack |
+| **Dual-Arm Cup Place-Stack** | `dual_cup_place_stack` | Dual-arm: bring two separated cups together into a centered nested stack |
+| **Dual-Arm Cup Handover & Place** | `dual_cup_handover_place` | Dual-arm: one arm grasps a cup and hands it to the other arm, which places it |
+| **Dual-Arm Plate Place-Stack** | `dual_plate_place_stack` | Dual-arm: bring two separated plates together into a centered stack |
 
-To build more tasks, refer to the [Task Creation Guide](./docs/TaskCreation.md) for instructions on how to define new manipulation tasks within the UniVTAC framework.
+To build more tasks, refer to the [Task Creation Guide](./docs/TaskCreation.md) for instructions on how to define new manipulation tasks within the UniVTAC framework — including dual-arm tasks, rigid in-hand "weld" carrying, rim grasps for wide objects, and peg insertion.
 
 ## Data Collection
 
@@ -77,6 +85,16 @@ To record a single **try shot** — run one seed exactly once at the highest fre
 python scripts/collect_data.py <task_name> record_one
 # -> data/<task_name>/record_one/video/0_<result>.mp4
 ```
+
+### Poster / figure view (third-person + tactile only)
+
+By default each video frame tiles the head **and wrist** camera views next to the tactile pads. For figures or posters you often want only the third-person (head) view plus the tactile views, with the wrist cameras removed. Set `UNIVTAC_POSTER_VIEW=1` to drop the wrist panels:
+
+```bash
+UNIVTAC_POSTER_VIEW=1 python scripts/collect_data.py <task_name> record_one
+```
+
+The frame then contains **head + tactile** only and is sized to fit: single-arm tasks → `640x320` (head + 2 tactiles), dual-arm tasks → `800x320` (head + 4 tactiles). Everything else (which seeds run, where the MP4 is written) is unchanged.
 
 ### Visualizing in the Isaac Sim GUI
 

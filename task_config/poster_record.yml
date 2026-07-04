@@ -1,0 +1,21 @@
+# Poster recording: one high-quality SUCCESS clip per task.
+# Use with UNIVTAC_POSTER_VIEW=1 -> frame = head (third view) + left/right tactile only
+# (no wrist cams), sized 640x320.
+#   UNIVTAC_POSTER_VIEW=1 python scripts/collect_data.py <task> poster_record
+# Output: data/<task>/poster_record/video/<seed>_success.mp4
+save_dir: ./data
+decimation: 1
+save_frequency: 5         # hdf5 not needed for posters; save sparsely
+video_frequency: 1        # capture a frame every step -> smooth clip
+render_frequency: 0       # headless (camera still rendered on each captured frame)
+random_texture: false
+use_seed: true
+episode_num: 1            # stop after 1 successful episode...
+start_seed: 0
+max_seed: 30              # ...trying up to seed 30 to land a clean success
+sensor_type: gsmini
+observations:
+  camera: ['rgb']
+  tactile: ['rgb', 'rgb_marker', 'marker', 'depth', 'pose']
+  embodiment: ['joint', 'ee']
+  actor: true

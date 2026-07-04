@@ -1,14 +1,49 @@
 from ._base_task import *
 import numpy as np
 
+WRIST_TILT_DEG = -30.0  # pitch the wrist cam (about its optical X) down toward the gripper
+WRIST_FOCAL = 1.3       # smaller focal length than baseline (1.94) -> wider FOV (None = leave)
+
+
 @configclass
 class TaskCfg(BaseTaskCfg):
     step_lim = 600
     adaptive_grasp_depth_threshold = 27.75
 
+
 class Task(BaseTask):
     def __init__(self, cfg: BaseTaskCfg, mode:Literal['collect', 'eval'] = 'collect', render_mode: str|None = None, **kwargs):
         super().__init__(cfg, mode, render_mode, **kwargs)
+        self._adjust_wrist_cam()
+
+    def _adjust_wrist_cam(self):
+        # Tilt the wrist camera mount down toward the gripper (delta on the working pose)
+        # and optionally widen its FOV by lowering focal length. Applied to every env.
+        try:
+            from pxr import UsdGeom
+            import isaacsim.core.utils.stage as stage_utils
+            import math
+            from pxr import Gf
+            stage = stage_utils.get_current_stage()
+            for prim in stage.Traverse():
+                path = prim.GetPath().pathString
+                if path.endswith('/Robot/WristCamera/Camera'):
+                    # tilt: post-multiply the camera orient by a pitch about its optical X
+                    if WRIST_TILT_DEG:
+                        xf = UsdGeom.Xformable(prim)
+                        for op in xf.GetOrderedXformOps():
+                            if op.GetOpName() == 'xformOp:orient':
+                                q = op.Get()  # Gf.Quatd/Quatf (w + imaginary vec)
+                                w0, im = q.GetReal(), q.GetImaginary()
+                                q0 = Gf.Quatd(float(w0), float(im[0]), float(im[1]), float(im[2]))
+                                a = math.radians(WRIST_TILT_DEG) / 2.0
+                                qp = Gf.Quatd(math.cos(a), math.sin(a), 0.0, 0.0)  # about local X
+                                qn = (q0 * qp).GetNormalized()
+                                op.Set(type(q)(qn.GetReal(), *[float(v) for v in qn.GetImaginary()]))
+                    if WRIST_FOCAL is not None:
+                        UsdGeom.Camera(prim).GetFocalLengthAttr().Set(float(WRIST_FOCAL))
+        except Exception as e:
+            print(f"[CAMDBG] err: {e}", flush=True)
  
     def create_actors(self):
         self.cans:dict[int, Actor] = {}
