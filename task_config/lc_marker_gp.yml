@@ -1,0 +1,21 @@
+decimation: 1
+episode_num: 1
+save_dir: ./data_force
+save_frequency: 2
+video_frequency: 999999   # >0 so save frames fire (see _base_task _step gating)
+render_frequency: 0
+random_texture: false
+use_seed: true
+sensor_type: gsmini
+dense_gelpad: false
+gel_particle: true        # [flag] add markerless gel image at the marker resolution (320x240)
+observations:
+  actor: true
+  camera:
+  - rgb
+  embodiment:
+  - joint
+  - ee
+  tactile:
+  - rgb_marker            # the marker version (gel image WITH markers)
+  - depth

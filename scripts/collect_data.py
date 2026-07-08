@@ -189,6 +189,14 @@ def main():
     env_cfg.video_frequency = task_config.get("video_frequency", env_cfg.video_frequency)
     env_cfg.render_frequency = task_config.get("render_frequency", env_cfg.render_frequency)
     env_cfg.obs_data_type = task_config.get("observations", {})
+    # [PATCH-G] convenience flag: `gel_particle: true` collects the markerless "gel + speckle"
+    # tactile image alongside whatever else is configured (e.g. rgb_marker), at the SAME
+    # 320x240 sensor resolution as the marker version. Equivalent to adding 'gel_particle' to
+    # observations.tactile, but flippable on any existing (marker-based) collection config.
+    if task_config.get("gel_particle", False):
+        tac = env_cfg.obs_data_type.setdefault("tactile", [])
+        if "gel_particle" not in tac:
+            tac.append("gel_particle")
     env_cfg.random_texture = task_config.get("random_texture", False)
 
     env_cfg.scene.num_envs = 1
