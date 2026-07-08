@@ -17,10 +17,10 @@ out = sys.argv[1] if len(sys.argv) > 1 else "/tmp/bowl_assets/BOWL.obj"
 os.makedirs(os.path.dirname(out), exist_ok=True)
 
 # ---- geometry in mm ----
-H = 39.4
+H = 58.0            # taller wall (was 39.4) -> more vertical grasp band, deeper grip room
 R_OUT = 65.0
 WALL = 4.5
-BASE_THICK = 14.0
+BASE_THICK = 15.0
 SECTIONS = 160
 
 ZB = -H / 2.0
@@ -28,28 +28,36 @@ ZT = H / 2.0
 R_IN = R_OUT - WALL
 
 # Cross-section polygon in (r, z), traced around the ceramic material.
-# Raise the inner bottom / foot stand so a second bowl bottoms out earlier and
-# cannot sink as deep when nested. That creates a larger geometry-defined gap.
-profile = np.array([
-    [0.0,  ZB],          # bottom center outer
-    [28.0, ZB],          # wider/taller outer foot stand
-    [36.0, ZB + 4.0],
-    [43.0, ZB + 10.8],
-    [50.0, ZB + 18.5],
-    [57.0, ZB + 26.0],
-    [61.0, ZB + 31.8],
-    [63.0, ZB + 35.1],
-    [64.0, ZB + 37.5],
-    [R_OUT, ZT],         # outer rim
-    [R_IN,  ZT],         # inner rim lip
-    [60.5, ZB + 36.9],
-    [57.2, ZB + 33.0],
-    [51.8, ZB + 25.2],
-    [46.2, ZB + 19.0],
-    [41.0, ZB + 16.2],
-    [35.0, ZB + BASE_THICK],
-    [0.0,  ZB + BASE_THICK],   # inner bottom closes the cavity
+# Tall STRAIGHT-WALLED design: the wall is perfectly VERTICAL at r=R_OUT over the
+# upper region so the gripper pinches a flat vertical surface (stable no-weld
+# grasp); the wall-to-base transition keeps a smooth CURVED fillet (not a sharp
+# corner) so a second bowl still seats/nests and the base is not a hard edge.
+R_FOOT = 40.0        # outer radius at the base of the fillet
+Z_KNEE = ZB + 15.0   # height where the outer fillet reaches full radius -> vertical above
+# Outer bottom fillet: smooth arc from the flat foot (R_FOOT, ZB) out to (R_OUT, Z_KNEE).
+outer_fillet = np.array([
+    [R_FOOT,       ZB],
+    [R_FOOT + 8.0, ZB + 2.0],
+    [R_FOOT + 15.0, ZB + 5.0],
+    [R_OUT - 4.0,  ZB + 9.0],
+    [R_OUT - 1.0,  ZB + 12.0],
+    [R_OUT,        Z_KNEE],
 ], dtype=np.float64)
+# Inner bottom fillet: mirror, offset in by WALL, closing to the cavity floor.
+inner_fillet = np.array([
+    [R_IN,             Z_KNEE + 2.0],
+    [R_IN - 2.0,       ZB + 12.0],
+    [R_IN - 8.0,       ZB + BASE_THICK + 4.0],
+    [R_FOOT - WALL - 2.0, ZB + BASE_THICK],
+    [0.0,              ZB + BASE_THICK],   # inner bottom closes the cavity
+], dtype=np.float64)
+profile = np.vstack([
+    [[0.0, ZB]],          # bottom center outer
+    outer_fillet,         # curved foot -> full radius
+    [[R_OUT, ZT]],        # >>> VERTICAL outer wall (grasp band) <<<
+    [[R_IN, ZT]],         # inner rim lip
+    inner_fillet,         # vertical inner wall -> curved -> cavity floor
+]).astype(np.float64)
 
 bowl = trimesh.creation.revolve(profile, sections=SECTIONS)
 bowl.apply_translation(-bowl.bounds.mean(axis=0))

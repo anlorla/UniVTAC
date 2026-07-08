@@ -18,14 +18,18 @@ import torch
 # ============================================================================
 
 # ---- 几何 (m) ----
-BOWL_HALF    = 0.0197    # 碗半高(原点->口沿 / 原点->底); USD 已是 ⌀130mm/高39.4mm 实尺, scale=1.0
+BOWL_HALF    = 0.029     # 碗半高(原点->口沿 / 原点->底); USD 已是 ⌀130mm/高58mm 实尺, scale=1.0
 BOWL_OUTER_R = 0.065     # 碗口外半径(⌀130mm)
-RIM_GRASP_R  = 0.060     # 夹爪中心(TCP)到碗轴的水平距离(落在口下约 5mm 处壁厚中线)
+RIM_GRASP_R  = 0.0625    # 夹爪中心(TCP)到碗轴的水平距离(竖直壁厚中线 r≈62.5mm, 壁 60.5~65)
 FOOT_R       = 0.026     # 圈足外半径
 TABLE_TOP    = 0.004     # 桌面顶高(碗底贴此面); 碗体心 = TABLE_TOP + BOWL_HALF
 GAP          = 0.006     # 初始体心离桌面的小间隙(放置/抓取留余量)
+# 去 weld 开关: 碗改成【竖直外壁】后, 夹爪闭到底被 5mm 碗壁挡住形成强力钳夹,
+# 靠接触摩擦即可扛住搬运 -> 不再 weld。改 True 可回退到旧的刚性绑定。
+USE_WELD     = False
 # 套叠抬高量(同 dual_bowl_unstack): 上碗坐进下碗后体心比下碗高 NEST_RISE。
-NEST_RISE    = 0.038
+# 竖壁碗嵌套更浅(外壁不再是斜面) -> 用范围判据而非固定值(见 check_success)。
+NEST_RISE    = 0.048
 STACK_GAP    = 0.0
 
 # ---- 摆位 (世界系) ----
@@ -39,7 +43,11 @@ STACK_TOP_TARGET = Pose(
 )
 
 # ---- 动作参数 ----
-RIM_GRASP_DZ    = BOWL_HALF - 0.006   # 抓取点竖直偏置(口沿顶下方约 6mm, 落在实壁上)
+RIM_GRASP_DZ    = BOWL_HALF - 0.022   # 抓取点竖直偏置(口沿下方约 22mm, 抓深一点更稳, 高壁给足余量)
+RIM_DOWN_EXTRA  = 0.020              # 到位后再多压 20mm, 让胶垫更实地落到内外壁上(照抄 unstack)
+GRASP_SIDE      = 0.05               # 悬停高度分量(side)
+GRASP_UP        = 0.06               # 悬停高度分量(up)
+GRASP_LIFT      = 0.10                # 抓稳后先竖直抬起的高度(再横移, 避免贴桌横拖带歪碗)
 GRASP_PRE_DIS   = 0.12                # 抓取前沿接近轴的悬停距离
 PRE_GRIPPER_OPEN = 1.0                # 碗沿抓取: 先全开, 让两指能跨在内外壁两侧
 PLACE_HOVER     = 0.12                # 放置目标正上方的悬停高度
@@ -109,9 +117,9 @@ class TaskCfg(BaseTaskCfg):
         ),
     ]
     # 双臂 + 碗沿抓取(分段受约束直线进刀) + 套叠落点, 比纸杯版略长;
-    # 两个抓-放周期约 1500 步, 把 step_lim / max_save_frames 都给足防中途截断。
-    step_lim = 1600
-    max_save_frames = 1600
+    # 去 weld 后每次抓取多了压实+底层强制夹紧+settle, 两周期约 1700 步 -> 给足 2600 防截断。
+    step_lim = 2600
+    max_save_frames = 2600
     reset_time_limit = 1200.0
 
 
@@ -137,11 +145,13 @@ class Task(BaseTask):
     # ---------------------------------------------------------------- actors
     def create_actors(self):
         # 下碗(bowl_a)放完后要当底座扛住上碗套入 -> 高密度+高摩擦留得住; 上碗(bowl_b)轻便于操作。
+        # 去 weld 后薄壁钳夹要扛住整只碗: 下碗必须大幅减重(2e5 会把夹持拉歪/滑脱),
+        # 只需比上碗略重, 好当底座不被套入时撞飞。
         self.bowl_a = self._actor_manager.add_from_usd_file(
             name="bowl_a",
             asset_path="BOWL.usd",
             pose=BOWL_A_START,
-            density=2e5,
+            density=1e4,
         )
         self.bowl_b = self._actor_manager.add_from_usd_file(
             name="bowl_b",
@@ -172,24 +182,64 @@ class Task(BaseTask):
         )
         return actor.register_point(grasp_pose, type="contact")
 
+    def _close_gripper_direct(self, rm, percent=0.0, settle_steps=10, is_save=True):
+        # 底层强制闭合并逐步 settle: 让两指切实压紧薄碗壁(仅 close_gripper 规划闭合往往夹不实)。
+        target = rm.gripper_percent2qpos(percent)
+        pos = torch.tensor([target, target], device=rm.device, dtype=rm.robot.data.joint_pos.dtype)
+        self.atom_id += 1
+        self.atom_tag = "close_direct"
+        rm.set_gripper(pos, force=True)
+        for _ in range(settle_steps):
+            rm.set_gripper(pos, force=True)
+            self._step(is_save=is_save)
+        self._update_render()
+
+    def _open_gripper_direct(self, rm, percent=1.0, settle_steps=12, is_save=True):
+        target = rm.gripper_percent2qpos(percent)
+        pos = torch.tensor([target, target], device=rm.device, dtype=rm.robot.data.joint_pos.dtype)
+        self.atom_id += 1
+        self.atom_tag = "open_direct"
+        rm.set_gripper(pos, force=True)
+        for _ in range(settle_steps):
+            rm.set_gripper(pos, force=True)
+            self._step(is_save=is_save)
+        self._update_render()
+
     def _grasp_bowl(self, actor, atom, rm, arm, rim_dir):
+        # 照抄 dual_bowl_unstack._grasp_rim 的成功配方(同一 BOWL 资产, 无 weld 也抓得住):
+        # 悬停 -> 受约束直线下探(多压 RIM_DOWN_EXTRA 让胶垫贴实内外壁) -> 规划闭合 + 底层强制夹紧。
+        rd = np.array(rim_dir, dtype=float); rd = rd / np.linalg.norm(rd)
         self.move(atom.open_gripper(PRE_GRIPPER_OPEN), arm=arm)
-        grasp_id = self._register_rim_grasp(actor, rim_dir)
+        center = actor.get_pose()
+        gp = np.array(center.p, dtype=float) + rd * RIM_GRASP_R + np.array([0.0, 0.0, RIM_GRASP_DZ])
+        gc = construct_grasp_pose(gp, np.array([0, 0, 1], dtype=float), np.array([1, 0, 0], dtype=float))
+        gc_high = gc.add_bias([0.0, 0.0, GRASP_SIDE + GRASP_UP], coord="world")   # 沿点正上方悬停
+        self.move(atom.move_to_pose(rm.gripper_center_to_ee(gc_high)), arm=arm)
+        down_total = GRASP_SIDE + GRASP_UP + RIM_DOWN_EXTRA
+        self.move(atom.move_by_displacement(z=down_total * 0.75, xyz_coord="local"), arm=arm,
+                  constraint_pose=[1, 1, 1, 1, 1, 0], time_dilation_factor=0.5)
+        self.move(atom.move_by_displacement(z=down_total * 0.25, xyz_coord="local"), arm=arm,
+                  constraint_pose=[1, 1, 1, 1, 1, 0], time_dilation_factor=0.5)
+        # 直接闭满 + 底层强制夹紧, 让两指切实压紧碗壁。
+        self.move(atom.close_gripper(0.0, depth_threshold=None), arm=arm)
+        self._close_gripper_direct(rm, 0.0, settle_steps=10, is_save=True)
+        if USE_WELD:
+            self.weld_actor(actor, rm)
+        self.delay(8, is_save=True)
+        # 抓稳后先竖直抬起, 再由 _place_inhand 横移 -> 避免贴桌横拖把碗带歪/脱手。
         self.move(
-            atom.grasp_actor(
-                actor,
-                contact_point_id=grasp_id,
-                pre_dis=GRASP_PRE_DIS,
-                dis=0.0,
-                is_close=False,
-            ),
+            atom.move_by_displacement(z=GRASP_LIFT, xyz_coord="world"),
             arm=arm,
             time_dilation_factor=0.5,
         )
-        # 碗沿无法自适应判深 -> 直接 100% 闭合到底, 再 weld 把碗刚性绑到夹爪(搬运不滑脱)。
-        self.move(atom.close_gripper(0.0, depth_threshold=None), arm=arm)
-        self.weld_actor(actor, rm)
-        self.delay(8, is_save=True)
+        gc = rm.get_gripper_center_pose()
+        bp = actor.get_pose()
+        print(
+            f"[BOWL_STACK] {arm} grasp+lift: bowl=({bp.p[0]:.3f},{bp.p[1]:.3f},{bp.p[2]:.3f}) "
+            f"gc=({gc.p[0]:.3f},{gc.p[1]:.3f},{gc.p[2]:.3f}) "
+            f"held={'YES' if bp.p[2] > 0.08 else 'NO(dropped)'}",
+            flush=True,
+        )
 
     def _place_inhand(self, actor, rm, atom, target_pose, arm):
         # 用当前在手相对位姿反解夹爪中心目标 -> 即使碗沿离心抓持, 也能把碗体心摆到 target。
@@ -204,9 +254,10 @@ class Task(BaseTask):
         self._welds = [w for w in self._welds if w[0] is not actor]
 
     def _release_bowl(self, actor, atom, arm, park=False, retract=True):
+        rm, _ = self._arm(arm)
         self._unweld_actor(actor)
         self.delay(5, is_save=True)
-        self.move(atom.open_gripper(1.0), arm=arm)
+        self._open_gripper_direct(rm, 1.0, settle_steps=12, is_save=True)
         if retract:
             self.move(
                 atom.move_by_displacement(z=RETRACT_Z, xyz_coord="world"),
@@ -291,5 +342,6 @@ class Task(BaseTask):
             f"height_err={height_err*1000:.1f}mm a_up={a_up} b_up={b_up}",
             flush=True,
         )
-        # 碗比纸杯宽, 落点/套叠容差稍放宽。
-        return bool(target_err < 0.04 and stack_err < 0.03 and height_err < 0.025 and a_up and b_up)
+        # 碗比纸杯宽, 落点/套叠容差稍放宽; 竖壁碗嵌套深度不固定 -> 用范围判"上碗坐在下碗上方"。
+        nested = 0.025 < dz < 0.072
+        return bool(target_err < 0.04 and stack_err < 0.03 and nested and a_up and b_up)

@@ -1,5 +1,6 @@
 from ._base_task import *
 import numpy as np
+import torch
 
 # ============================================================================
 # Dual Plate PLACE-STACK —— 双臂叠放浅盘:
@@ -22,14 +23,22 @@ import numpy as np
 #     时仍会记录 tactile rgb/depth/marker/pose。
 # ============================================================================
 
-# ---- 几何 (m) ----
-PLATE_HALF_Z = 0.004
-PLATE_R = 0.100
-RIM_GRASP_R = 0.098
-RIM_GRASP_DZ = PLATE_HALF_Z - 0.002
+# 去 weld 开关: 盘改成【更大更矮壁的碗】(竖直外壁)后, 夹爪闭到底被 4.5mm 壁挡住形成强力钳夹,
+# 靠接触摩擦即可扛住搬运 -> 不再 weld。改 True 可回退到旧的刚性绑定。
+USE_WELD = False
+
+# ---- 几何 (m) ---- (PLATE_STACK.usd = Ø190mm/高40mm 竖壁浅碗, 实尺 scale=1.0)
+PLATE_HALF_Z = 0.020     # 盘半高(原点->沿口 / 原点->底)
+PLATE_R = 0.095          # 盘口外半径(Ø190mm)
+RIM_GRASP_R = 0.091      # 夹爪中心(TCP)到盘轴的水平距离(竖直壁厚中线 r≈91mm, 8mm 壁 87~95)
+RIM_GRASP_DZ = PLATE_HALF_Z - 0.014   # 抓取点竖直偏置(沿口下方约 14mm, 落在竖直壁带上)
+RIM_DOWN_EXTRA = 0.014   # 到位后再多压 14mm 让胶垫贴实(40mm 壁给足余量, 又不顶桌面)
+GRASP_SIDE = 0.05        # 悬停高度分量(side)
+GRASP_UP = 0.06          # 悬停高度分量(up)
+GRASP_LIFT = 0.10        # 抓稳后先竖直抬起的高度(再横移)
 TABLE_TOP = 0.004
 GAP = 0.006
-STACK_DZ = 0.010
+STACK_DZ = 0.028         # 套叠抬高量(H40 竖壁; 见 check_success 用范围判)
 
 # ---- 摆位 (世界系) ----
 UPRIGHT = [1, 0, 0, 0]
@@ -109,7 +118,9 @@ class TaskCfg(BaseTaskCfg):
             update_period=1 / 120,
         ),
     ]
-    step_lim = 1400
+    # 去 weld 后每次抓取多了压实+底层强制夹紧+settle, 两周期约 1700 步 -> 给足 2600 防截断。
+    step_lim = 2600
+    max_save_frames = 2600
     reset_time_limit = 1200.0
 
 
@@ -132,18 +143,18 @@ class Task(BaseTask):
 
     # ---------------------------------------------------------------- actors
     def create_actors(self):
-        density = 2e5
+        # 去 weld 后薄壁钳夹要扛住整只盘: 下盘大幅减重(2e5 会把夹持拉歪/滑脱), 只需比上盘略重当底座。
         self.plate_a = self._actor_manager.add_from_usd_file(
             name="plate_a",
-            asset_path="PLATE.usd",
+            asset_path="PLATE_STACK.usd",
             pose=PLATE_A_START,
-            density=density,
+            density=1e4,
         )
         self.plate_b = self._actor_manager.add_from_usd_file(
             name="plate_b",
-            asset_path="PLATE.usd",
+            asset_path="PLATE_STACK.usd",
             pose=PLATE_B_START,
-            density=density,
+            density=5e3,
         )
 
     def _reset_actors(self):
@@ -166,23 +177,66 @@ class Task(BaseTask):
         )
         return actor.register_point(grasp_pose, type="contact")
 
-    def _grasp_plate(self, actor, atom, rm, arm, rim_dir):
+    def _close_gripper_direct(self, rm, percent=0.0, settle_steps=10, is_save=True):
+        # 底层强制闭合并逐步 settle: 让两指切实压紧薄盘壁(仅 close_gripper 规划闭合往往夹不实)。
+        target = rm.gripper_percent2qpos(percent)
+        pos = torch.tensor([target, target], device=rm.device, dtype=rm.robot.data.joint_pos.dtype)
+        self.atom_id += 1
+        self.atom_tag = "close_direct"
+        rm.set_gripper(pos, force=True)
+        for _ in range(settle_steps):
+            rm.set_gripper(pos, force=True)
+            self._step(is_save=is_save)
+        self._update_render()
+
+    def _open_gripper_direct(self, rm, percent=1.0, settle_steps=12, is_save=True):
+        target = rm.gripper_percent2qpos(percent)
+        pos = torch.tensor([target, target], device=rm.device, dtype=rm.robot.data.joint_pos.dtype)
+        self.atom_id += 1
+        self.atom_tag = "open_direct"
+        rm.set_gripper(pos, force=True)
+        for _ in range(settle_steps):
+            rm.set_gripper(pos, force=True)
+            self._step(is_save=is_save)
+        self._update_render()
+
+    def _grasp_plate(self, actor, atom, rm, arm, rim_dir, camera_up=(1, 0, 0)):
+        # 照抄 dual_bowl_place_stack/unstack 的成功配方(no-weld 也抓得住):
+        # 悬停 -> 受约束直线下探(多压 RIM_DOWN_EXTRA 让胶垫贴实内外壁) -> 规划闭合 + 底层强制夹紧 -> 先抬后移。
+        # camera_up 决定腕部朝向: A(+Y臂)用 [1,0,0]; 镜像的 B(-Y臂)在宽盘抓取点上需 [-1,0,0] 才可达
+        # (手指仍沿 Y 夹壁, 只是腕翻到 B 的自然侧)。
+        rd = np.array(rim_dir, dtype=float); rd = rd / np.linalg.norm(rd)
         self.move(atom.open_gripper(1.0), arm=arm)
-        grasp_id = self._register_rim_grasp(actor, rim_dir)
+        center = actor.get_pose()
+        gp = np.array(center.p, dtype=float) + rd * RIM_GRASP_R + np.array([0.0, 0.0, RIM_GRASP_DZ])
+        print(f"[PLATE_STACK] {arm} grasp target gp=({gp[0]:.3f},{gp[1]:.3f},{gp[2]:.3f}) "
+              f"center=({center.p[0]:.3f},{center.p[1]:.3f}) rim_dir={tuple(rim_dir)} cam_up={tuple(camera_up)}", flush=True)
+        gc = construct_grasp_pose(gp, np.array([0, 0, 1], dtype=float), np.array(camera_up, dtype=float))
+        gc_high = gc.add_bias([0.0, 0.0, GRASP_SIDE + GRASP_UP], coord="world")
+        self.move(atom.move_to_pose(rm.gripper_center_to_ee(gc_high)), arm=arm)
+        down_total = GRASP_SIDE + GRASP_UP + RIM_DOWN_EXTRA
+        self.move(atom.move_by_displacement(z=down_total * 0.75, xyz_coord="local"), arm=arm,
+                  constraint_pose=[1, 1, 1, 1, 1, 0], time_dilation_factor=0.5)
+        self.move(atom.move_by_displacement(z=down_total * 0.25, xyz_coord="local"), arm=arm,
+                  constraint_pose=[1, 1, 1, 1, 1, 0], time_dilation_factor=0.5)
+        self.move(atom.close_gripper(0.0, depth_threshold=None), arm=arm)
+        self._close_gripper_direct(rm, 0.0, settle_steps=10, is_save=True)
+        if USE_WELD:
+            self.weld_actor(actor, rm)
+        self.delay(8, is_save=True)
         self.move(
-            atom.grasp_actor(
-                actor,
-                contact_point_id=grasp_id,
-                pre_dis=GRASP_PRE_DIS,
-                dis=0.0,
-                is_close=False,
-            ),
+            atom.move_by_displacement(z=GRASP_LIFT, xyz_coord="world"),
             arm=arm,
             time_dilation_factor=0.5,
         )
-        self.move(atom.close_gripper(0.0, depth_threshold=None), arm=arm)
-        self.weld_actor(actor, rm)
-        self.delay(8, is_save=True)
+        gc_now = rm.get_gripper_center_pose()
+        bp = actor.get_pose()
+        print(
+            f"[PLATE_STACK] {arm} grasp+lift: plate=({bp.p[0]:.3f},{bp.p[1]:.3f},{bp.p[2]:.3f}) "
+            f"gc=({gc_now.p[0]:.3f},{gc_now.p[1]:.3f},{gc_now.p[2]:.3f}) "
+            f"held={'YES' if bp.p[2] > 0.08 else 'NO(dropped)'}",
+            flush=True,
+        )
 
     def _place_inhand(self, actor, rm, atom, target_pose, arm):
         inhand = actor.get_pose().rebase(rm.get_gripper_center_pose())
@@ -196,13 +250,16 @@ class Task(BaseTask):
         self._welds = [w for w in self._welds if w[0] is not actor]
 
     def _release_plate(self, actor, atom, arm, park=False):
+        rm, _ = self._arm(arm)
         self._unweld_actor(actor)
         self.delay(5, is_save=True)
-        self.move(atom.open_gripper(1.0), arm=arm)
+        self._open_gripper_direct(rm, 1.0, settle_steps=12, is_save=True)
+        # 注意: 竖直回撤【不要】加 constraint_pose=[1,1,1,1,1,0] —— 锁 5 轴的约束回撤在放盘后的
+        # 位形常规划不出而报错, 而框架里任何一步 move 失败会【跳过后续所有 move】(于是 B 整段被跳过、
+        # 永远抓不到)。改成普通世界系竖直位移(照抄 bowl 的 _release_bowl)。
         self.move(
             atom.move_by_displacement(z=RETRACT_Z, xyz_coord="world"),
             arm=arm,
-            constraint_pose=[1, 1, 1, 1, 1, 0],
             time_dilation_factor=0.5,
         )
         if park:
@@ -243,16 +300,24 @@ class Task(BaseTask):
         self._release_plate(self.plate_a, self.atom_a, "a", park=True)
         self._dbg("A placed plate_a")
 
-        # B: 把上盘从 -Y 侧搬到 plate_a 正上方。
-        self._grasp_plate(self.plate_b, self.atom_b, self._robot_manager_b, "b", rim_dir=(0, -1, 0))
+        # B: 把上盘从 -Y 侧搬到 plate_a 正上方。抓最远 -Y 沿(A 的镜像对称, 同 bowl 的成功配置)。
+        self._grasp_plate(self.plate_b, self.atom_b, self._robot_manager_b, "b",
+                          rim_dir=(0, -1, 0), camera_up=(1, 0, 0))
+        # 关键: 对准 plate_a 的【实际落点】(而非名义 STACK_TARGET)。plate_a 带噪声/微偏, 若 B 固定往
+        # 名义中心放 -> 盘沿错位相撞把底盘撞歪(同叠杯的失败机理)。
+        pa = self.plate_a.get_pose()
+        top_target = Pose(
+            [float(pa.p[0]), float(pa.p[1]), float(pa.p[2]) + STACK_DZ],
+            UPRIGHT,
+        )
         self._place_inhand(
             self.plate_b,
             self._robot_manager_b,
             self.atom_b,
-            STACK_TOP_TARGET.add_bias([0.0, 0.0, PLACE_HOVER], coord="world"),
+            top_target.add_bias([0.0, 0.0, PLACE_HOVER], coord="world"),
             "b",
         )
-        self._place_inhand(self.plate_b, self._robot_manager_b, self.atom_b, STACK_TOP_TARGET, "b")
+        self._place_inhand(self.plate_b, self._robot_manager_b, self.atom_b, top_target, "b")
         self._release_plate(self.plate_b, self.atom_b, "b")
         self._dbg("B stacked plate_b")
         self.delay(30, is_save=True)
@@ -282,4 +347,6 @@ class Task(BaseTask):
             f"height_err={height_err*1000:.1f}mm a_up={a_up} b_up={b_up}",
             flush=True,
         )
-        return bool(target_err < 0.04 and stack_err < 0.03 and height_err < 0.015 and a_up and b_up)
+        # 竖壁盘嵌套深度不固定 -> 用范围判"上盘坐在下盘上方"(去 weld 后套叠更自然)。
+        nested = 0.012 < dz < 0.050
+        return bool(target_err < 0.04 and stack_err < 0.03 and nested and a_up and b_up)
