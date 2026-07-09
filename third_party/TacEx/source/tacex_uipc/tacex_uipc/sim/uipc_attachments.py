@@ -354,6 +354,38 @@ class UipcIsaacAttachments:
                     offset = offset.cpu().numpy()
                     attachment_offsets.append(offset)
 
+        # ================= geometric fallback =================
+        # PhysX scene query is fully blind in some environments (GPU pipeline /
+        # certain isaacsim builds): the sphere sweep above then yields 0 points and
+        # the gelpad is left unconstrained (it free-falls off the gripper).
+        # Fallback: the gelpad is a thin slab glued to the sensor case. Take the
+        # slab thickness axis (smallest PCA eigenvector) and select the vertex
+        # layer on the side facing the case origin.
+        if len(idx) == 0:
+            print(f"[UipcIsaacAttachments] sweep found 0 attachment points for {isaac_mesh_path} "
+                  f"(PhysX scene query blind?) -> geometric fallback", flush=True)
+            vp = np.asarray(vertex_positions, dtype=np.float64).reshape(-1, 3)
+            center = vp.mean(axis=0)
+            vc = vp - center
+            _w, _V = np.linalg.eigh(np.cov(vc.T))
+            n = _V[:, 0]  # thickness direction (smallest variance)
+            if np.dot(obj_pos - center, n) < 0:
+                n = -n  # point towards the case origin
+            t = vc @ n
+            sel = np.where(t >= t.max() - 0.8e-3)[0]  # 0.8mm layer on the case side
+            for i in sel:
+                v = vp[i]
+                attachment_points_positions.append(v)
+                idx.append(int(i))
+                offset = v - obj_pos
+                offset = torch.tensor(offset, device="cuda:0").float()
+                offset = math_utils.quat_apply_inverse(obj_orientation[0].reshape((1, 4)), offset.reshape((1, 3)))[0]
+                offset = offset.cpu().numpy()
+                attachment_offsets.append(offset)
+            print(f"[UipcIsaacAttachments] geometric fallback selected {len(sel)} pts "
+                  f"(slab_extent={ (t.max()-t.min())*1000:.1f}mm)", flush=True)
+        # ======================================================
+
         attachment_points_positions = np.array(attachment_points_positions).reshape(-1, 3)
 
         # offset to later compute the `should-be` positions of the attachment point
