@@ -136,7 +136,7 @@ class RobotManager:
     def get_gripper_qpos(self):
         return self.get_qpos()[0, self._gripper_ids[0]].clone().cpu().item()
     def get_gripper_percentage(self):
-        return self.get_gripper_qpos().item() / self.gripper_max_qpos
+        return self.get_gripper_qpos() / self.gripper_max_qpos
 
     def set_arm(self, pos:torch.Tensor, vel:torch.Tensor=None, env_ids:slice=None, force:bool=True):
         '''设置目标位姿'''

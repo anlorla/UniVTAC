@@ -196,8 +196,9 @@ class Task(BaseTask):
         hover = PLACE_POSE.add_bias([0.0, 0.0, 0.10])     # 放置点正上方 10cm 悬停
         self._place_inhand(self.cup_b, self._robot_manager, self.atom_a, hover, 'a')
         self._dbg("A 移到放置点上方")
-        self.move(self.atom_a.move_by_displacement(z=-0.085, xyz_coord='world'),
-                  arm='a', time_dilation_factor=0.5)       # 下放贴桌
+        self.move(self.atom_a.move_by_displacement(z=-0.10, xyz_coord='world'),
+                  arm='a', time_dilation_factor=0.5)       # 修:降到 PLACE_POSE.z(原-0.085只降到上方15mm半空松爪)
+        self.delay(8, is_save=True)                         # 落稳再松爪
         self.move(self.atom_a.open_gripper(1.0), arm='a')  # 松爪释放上杯
         self._dbg("A 放下上杯并松爪")
         self.delay(25, is_save=True)
@@ -206,7 +207,7 @@ class Task(BaseTask):
     def check_success(self):
         ap = self.cup_a.get_pose()
         bp = self.cup_b.get_pose()
-        # 拆开成功 = 两杯水平分离(不再同轴套叠) + 上杯仍基本正立(没被甩翻)。
+        # 拆开成功 = 两杯水平分离 + 上杯放稳 + 原下杯未被绊倒。
         horiz = float(np.linalg.norm(np.array(ap.p[:2], dtype=float) - np.array(bp.p[:2], dtype=float)))
         separated = horiz > 0.12
         a_up = float(np.dot(ap.to_transformation_matrix()[:3, 2], np.array([0, 0, 1]))) > 0.7
@@ -214,6 +215,15 @@ class Task(BaseTask):
         self.metadata['cup_a'] = [float(v) for v in ap.p]
         self.metadata['cup_b'] = [float(v) for v in bp.p]
         self.metadata['horiz_sep'] = horiz
+        self.metadata['cup_a_upright'] = bool(a_up)
+        self.metadata['cup_b_upright'] = bool(b_up)
         print(f"[UNSTACK] horiz_sep={horiz*1000:.1f}mm a_up={a_up} b_up={b_up} "
               f"-> separated={separated}", flush=True)
-        return bool(separated and b_up)
+        placed = float(bp.p[2]) < (TABLE_TOP + CUP_HALF + 0.035)   # top cup set down on table, not held aloft
+        self.metadata['cup_b_z'] = float(bp.p[2])
+        pa = self._robot_manager.get_gripper_percentage()
+        released = pa > 0.9   # A gripper opened = cup actually let go
+        bottom_ok = a_up
+        print(f"[UNSTACK-REL] cup_b_z={float(bp.p[2])*1000:.0f}mm gripperA={pa:.2f} "
+              f"placed={placed} released={released} bottom_ok={bottom_ok}", flush=True)
+        return bool(separated and bottom_ok and b_up and placed and released)

@@ -244,7 +244,7 @@ class Task(BaseTask):
         self._dbg("A 移到放置点上方")
         # 从盘正上方只沿世界 -Z 下放, 避免最后一个落点仍偏离盘中心。
         gripper_now = self._robot_manager.get_gripper_center_pose()
-        drop_z = 0.5 * (PLACE_POSE.p[2] - gripper_now.p[2])
+        drop_z = (PLACE_POSE.p[2] - gripper_now.p[2])   # 修:下降到位(原0.5*只降一半→碗在盘上方~66mm就松爪没落盘)
         self.move(self.atom_a.move_by_displacement(z=float(drop_z), xyz_coord='world'),
                   arm='a', constraint_pose=[1, 1, 1, 1, 1, 0], time_dilation_factor=0.5)
         self.move(self.atom_a.move_by_displacement(z=-PLACE_SETTLE_DROP, xyz_coord='world'),
@@ -271,4 +271,7 @@ class Task(BaseTask):
         self.metadata['bowl_b_to_plate_horiz'] = plate_horiz
         print(f"[UNSTACK] horiz_sep={horiz*1000:.1f}mm plate_err={plate_horiz*1000:.1f}mm "
               f"a_up={a_up} b_up={b_up} on_plate={on_plate} -> separated={separated}", flush=True)
-        return bool(separated and b_up and on_plate)
+        pa = self._robot_manager.get_gripper_percentage()
+        released = pa > 0.9   # A gripper opened = bowl actually let go
+        print(f"[UNSTACK] gripperA={pa:.2f} released={released}", flush=True)
+        return bool(separated and b_up and on_plate and released)

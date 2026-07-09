@@ -53,3 +53,8 @@ textures.zip
 **/act-ckpt/*
 /*.png
 **/tmp.png
+
+# editor / ad-hoc backup files
+*.bak
+*.bak_*
+*.orig
