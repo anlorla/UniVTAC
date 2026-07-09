@@ -47,6 +47,8 @@ PRE_GRIPPER_OPEN = 0.62
 PLACE_HOVER = 0.11
 RETRACT_Z = 0.10
 ARM_A_PARK_POS = [0.36, 0.30, 0.24]
+GRIPPER_RELEASE_THRESH = 0.65
+SUCCESS_HOLD_STEPS = 8
 
 
 @configclass
@@ -157,6 +159,7 @@ class Task(BaseTask):
         noise_b = self.create_noise([0.003, 0.003, 0.0])
         self.cup_a.set_pose(CUP_A_START.add_offset(noise_a))
         self.cup_b.set_pose(CUP_B_START.add_offset(noise_b))
+        self._success_hold_count = 0
         self.metadata["target_pose"] = [float(v) for v in STACK_TARGET.p]
 
     # ---------------------------------------------------------------- helpers
@@ -200,6 +203,12 @@ class Task(BaseTask):
 
     def _unweld_actor(self, actor):
         self._welds = [w for w in self._welds if w[0] is not actor]
+
+    def _cups_released(self):
+        a_open = float(self._robot_manager.get_gripper_percentage()) >= GRIPPER_RELEASE_THRESH
+        b_open = float(self._robot_manager_b.get_gripper_percentage()) >= GRIPPER_RELEASE_THRESH
+        no_cup_welds = not any(w[0] is self.cup_a or w[0] is self.cup_b for w in self._welds)
+        return a_open, b_open, no_cup_welds, bool(a_open and b_open and no_cup_welds)
 
     def _release_cup(self, actor, atom, arm, park=False, retract=True):
         self._unweld_actor(actor)
@@ -278,16 +287,29 @@ class Task(BaseTask):
         height_err = abs(dz - NEST_RISE)
         a_up = float(np.dot(ap.to_transformation_matrix()[:3, 2], np.array([0, 0, 1]))) > 0.75
         b_up = float(np.dot(bp.to_transformation_matrix()[:3, 2], np.array([0, 0, 1]))) > 0.75
+        a_open, b_open, no_cup_welds, released = self._cups_released()
+        geom_ok = target_err < 0.035 and stack_err < 0.025 and height_err < 0.025 and a_up and b_up
+        if geom_ok and released:
+            self._success_hold_count = getattr(self, "_success_hold_count", 0) + 1
+        else:
+            self._success_hold_count = 0
 
         self.metadata["cup_a"] = [float(v) for v in ap.p]
         self.metadata["cup_b"] = [float(v) for v in bp.p]
         self.metadata["target_err"] = target_err
         self.metadata["stack_err"] = stack_err
         self.metadata["height_err"] = height_err
+        self.metadata["gripper_a_open"] = a_open
+        self.metadata["gripper_b_open"] = b_open
+        self.metadata["cups_unwelded"] = no_cup_welds
+        self.metadata["released"] = released
+        self.metadata["success_hold_count"] = int(self._success_hold_count)
         print(
             f"[PLACE_STACK] target_err={target_err*1000:.1f}mm "
             f"stack_err={stack_err*1000:.1f}mm dz={dz*1000:.1f}mm "
-            f"height_err={height_err*1000:.1f}mm a_up={a_up} b_up={b_up}",
+            f"height_err={height_err*1000:.1f}mm a_up={a_up} b_up={b_up} "
+            f"a_open={a_open:.2f} b_open={b_open:.2f} unwelded={no_cup_welds} "
+            f"hold={self._success_hold_count}/{SUCCESS_HOLD_STEPS}",
             flush=True,
         )
-        return bool(target_err < 0.035 and stack_err < 0.025 and height_err < 0.025 and a_up and b_up)
+        return bool(self._success_hold_count >= SUCCESS_HOLD_STEPS)

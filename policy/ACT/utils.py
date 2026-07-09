@@ -2,6 +2,7 @@ import numpy as np
 import torch
 import os
 import h5py
+import cv2
 from pathlib import Path
 from torch.utils.data import TensorDataset, DataLoader
 from torchvision import transforms
@@ -9,6 +10,20 @@ from torchvision import transforms
 import IPython
 
 e = IPython.embed
+
+
+def _maybe_decode_image(image):
+    if isinstance(image, (bytes, bytearray, np.bytes_)):
+        buf = np.frombuffer(bytes(image), np.uint8)
+    elif isinstance(image, np.ndarray) and image.dtype.kind == "S":
+        buf = np.frombuffer(image.tobytes(), np.uint8)
+    else:
+        return image
+
+    decoded = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+    if decoded is None:
+        raise ValueError("Failed to decode encoded image bytes from ACT dataset")
+    return decoded
 
 
 class EpisodicDataset(torch.utils.data.Dataset):
@@ -53,10 +68,14 @@ class EpisodicDataset(torch.utils.data.Dataset):
             qpos = root["/observations/qpos"][start_ts]
             image_dict = dict()
             for cam_name in self.camera_names:
-                image_dict[cam_name] = root[f"/observations/images/{cam_name}"][start_ts]
+                image_dict[cam_name] = _maybe_decode_image(
+                    root[f"/observations/images/{cam_name}"][start_ts]
+                )
             tactile_dict = dict()
             for tactile_name in self.tactile_names:
-                tactile_dict[tactile_name] = root[f"/observations/images/{tactile_name}"][start_ts]
+                tactile_dict[tactile_name] = _maybe_decode_image(
+                    root[f"/observations/images/{tactile_name}"][start_ts]
+                )
             # get all actions after and including start_ts
             if is_sim:
                 action = root["/action"][start_ts:]
@@ -205,10 +224,14 @@ class TacArenaDataset(torch.utils.data.Dataset):
         qpos = root["/observations/qpos"][start_ts]
         image_dict = dict()
         for cam_name in self.camera_names:
-            image_dict[cam_name] = root[f"/observations/images/{cam_name}"][start_ts]
+            image_dict[cam_name] = _maybe_decode_image(
+                root[f"/observations/images/{cam_name}"][start_ts]
+            )
         tactile_dict = dict()
         for tactile_name in self.tactile_names:
-            tactile_dict[tactile_name] = root[f"/observations/images/{tactile_name}"][start_ts]
+            tactile_dict[tactile_name] = _maybe_decode_image(
+                root[f"/observations/images/{tactile_name}"][start_ts]
+            )
 
         action = root["/action"][start_ts:end_ts]
         padded_action = np.zeros((self.chunk_size, action.shape[1]), dtype=np.float32)
