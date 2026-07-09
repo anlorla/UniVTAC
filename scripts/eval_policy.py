@@ -1,3 +1,4 @@
+import os
 from shutil import ExecError
 import sys
 
@@ -62,7 +63,8 @@ AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
 args_cli = parser.parse_args()
 args_cli.enable_cameras = True
-args_cli.livestream = 2
+args_cli.livestream = int(os.environ.get("UNIVTAC_LIVESTREAM", "0"))
+args_cli.headless = os.environ.get("UNIVTAC_GUI") is None
 args_cli.num_envs = 1
 
 # launch omniverse app, must done before importing anything from omni.isaac
@@ -223,6 +225,7 @@ def main():
     env_cfg.save_frequency = task_config.get("save_frequency", env_cfg.save_frequency)
     env_cfg.video_frequency = task_config.get("video_frequency", env_cfg.video_frequency)
     env_cfg.random_texture = task_config.get("random_texture", False)
+    env_cfg.ground_plate_color = task_config.get("ground_plate_color", env_cfg.ground_plate_color)
 
     env_cfg.scene.num_envs = 1
     env_cfg.sim.device = args_cli.device if args_cli.device is not None \

@@ -58,8 +58,10 @@ def worker_run(task_config, task_file_name, base_save_dir: Path, seed_q: Queue,
     AppLauncher.add_app_launcher_args(parser)
     app_args = parser.parse_args([])
     app_args.enable_cameras = True
+    app_args.livestream = int(os.environ.get("UNIVTAC_LIVESTREAM", "0"))
+    app_args.headless = os.environ.get("UNIVTAC_GUI") is None
     app_args.num_envs = 1
-    if task_config.get('render_frequency', 1) == 0:
+    if task_config.get('render_frequency', 1) == 0 and app_args.livestream == 1:
         app_args.livestream = 2
 
     app_launcher = AppLauncher(app_args)
@@ -71,11 +73,20 @@ def worker_run(task_config, task_file_name, base_save_dir: Path, seed_q: Queue,
         env_cfg: 'BaseTaskCfg' = task_module.TaskCfg()
         worker_id = current_process().name.split('-')[-1]
         env_cfg.save_dir = base_save_dir
+        env_cfg.tactile_sensor_type = task_config.get('sensor_type', 'gsmini')
+        env_cfg.dense_gelpad = task_config.get('dense_gelpad', False)
+        env_cfg.force_field_grid = tuple(task_config.get('force_field_grid', (64, 48)))
         env_cfg.decimation = task_config.get("decimation", env_cfg.decimation)
         env_cfg.save_frequency = task_config.get("save_frequency", env_cfg.save_frequency)
         env_cfg.video_frequency = task_config.get("video_frequency", env_cfg.video_frequency)
         env_cfg.render_frequency = task_config.get("render_frequency", env_cfg.render_frequency)
         env_cfg.obs_data_type = task_config.get("observations", {})
+        if task_config.get("gel_particle", False):
+            tac = env_cfg.obs_data_type.setdefault("tactile", [])
+            if "gel_particle" not in tac:
+                tac.append("gel_particle")
+        env_cfg.random_texture = task_config.get("random_texture", False)
+        env_cfg.ground_plate_color = task_config.get("ground_plate_color", env_cfg.ground_plate_color)
         env_cfg.scene.num_envs = 1
         # Device routing by CUDA env
 
@@ -250,7 +261,7 @@ def main():
 
     # Start seed logic: use config start_seed if provided, else 0
     start_seed = task_config.get("start_seed", 0)
-    if start_seed is None:
+    if start_seed is None or start_seed < 0:
         start_seed = 0
     next_seed = start_seed
 
@@ -300,6 +311,7 @@ def main():
             next_seed += 1
 
         while any(p.is_alive() for p in workers):
+            done = progress.get('done', 0)
             # Drain results queue and log clean summaries
             while True:
                 try:
@@ -316,10 +328,10 @@ def main():
                         write_clean(f"{prefix} error; see out.log for traceback")
                     write_out(f"{prefix} result={event['result']} cost={event['cost']} steps={event['steps']} saves={event['save_count']} plan={event['plan_success']} check={event['check_success']}")
 
+                    done = progress.get('done', 0)
                     if done < target_episodes:
-                        for _ in range(args.workers):
-                            seed_q.put(next_seed)
-                            next_seed += 1
+                        seed_q.put(next_seed)
+                        next_seed += 1
                     else:
                         for _ in range(args.workers):
                             seed_q.put(None)

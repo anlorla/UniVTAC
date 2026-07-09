@@ -207,6 +207,7 @@ class BaseTaskCfg(DirectRLEnvCfg):
     gaussian_noise_cfg: GaussianNoiseCfg = GaussianNoiseCfg(mean=0.0, std=0.002, operation="add")
     
     random_texture: bool = False
+    ground_plate_color: tuple[float, float, float] | None = None
     keep_contact: bool = False
     max_save_frames: int = 1000
 
@@ -549,6 +550,12 @@ class BaseTask(UipcRLEnv):
 
         if self.cfg.random_texture:
             Actor._set_texture('/World/envs/env_0/ground_plate', 'random', self.rng)
+        if self.cfg.ground_plate_color is not None:
+            Actor._set_color(
+                '/World/envs/env_0/ground_plate',
+                tuple(float(v) for v in self.cfg.ground_plate_color),
+                name='GroundPlateColor',
+            )
         self._welds = []   # 清掉上一回合的刚性绑定
         self._tactile_manager._reset_idx()
         self._actor_manager._reset_idx(self.rng)
