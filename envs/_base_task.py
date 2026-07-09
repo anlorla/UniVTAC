@@ -443,12 +443,30 @@ class BaseTask(UipcRLEnv):
                 ))
         trimesh.Scene(geos).show()
 
+
+    def _gel_trace(self, tag):
+        import os as _os
+        if _os.environ.get('UNIVTAC_GEL_TRACE', '0') != '1':
+            return
+        try:
+            mans = [self._tactile_manager] + ([self._tactile_manager_b] if self.cfg.dual_arm else [])
+            zs = []
+            for man in mans:
+                for name, tact in man.tactiles.items():
+                    z = float(tact.gelpad.data.nodal_pos_w[:, 2].mean()) * 1000
+                    zs.append(f"{name}={z:.0f}mm")
+            print(f"[GELTRACE:{tag}] {' '.join(zs)}", flush=True)
+        except Exception as e:
+            print(f"[GELTRACE:{tag}] ERR {e}", flush=True)
+
     def reset(self, seed:int=-1, instructions:list[str]|None=None, options:dict[str, Any]|None=None):
         self.seed(seed)
         ret = super().reset()
+        self._gel_trace('after_super_reset')
         
         if self.first_frame is not None:
             self.uipc_sim.replay_frame(self.first_frame)
+            self._gel_trace('after_replay_frame')
 
         total_cost = time.perf_counter() - self.start_time
         if total_cost > self.cfg.reset_time_limit:
@@ -475,6 +493,7 @@ class BaseTask(UipcRLEnv):
 
             self.first_frame = self.uipc_sim.world.frame()
             self.uipc_sim.save_frame()
+            self._gel_trace('after_first_frame_save')
 
         if hasattr(self, '_reset_actors'):
             self._reset_actors()
@@ -489,6 +508,7 @@ class BaseTask(UipcRLEnv):
                     )
             self._update_render()
             self._actor_manager.remove_animate()
+            self._gel_trace('after_reset_actors')
         
         reset_test_start = time.perf_counter()
         for _ in range(5):
@@ -500,16 +520,22 @@ class BaseTask(UipcRLEnv):
                 )
         self._update_render()
 
+        self._gel_trace('after_settling')
         self.pre_move()
+        self._gel_trace('after_pre_move')
+        # ★ eval 沉降移到 in_pre_move=True 期间: dual_arm 的每步 reassert(硬置全 dof+清速度)
+        #   在纯静置的 delay 里会反复锤击夹爪-gel 的 IPC 接触界面, 20 步内把 gelpad 抖脱落
+        #   (采集模式没有这段 delay, 所以只在 eval 暴露)。挪进 pre_move 阶段避开 reassert。
+        if self.mode == "eval":
+            self.delay(force=True)
+            self._gel_trace('after_eval_delay')
         self.in_pre_move = False
 
         # update render to avoid artifacts
         for _ in range(5):
             self._update_render()
 
-        if self.mode == 'eval':
-            self.delay()
-
+        self._gel_trace('reset_done')
         self.atom_id = 0
         self.atom_tag = ''
 
