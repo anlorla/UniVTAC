@@ -27,10 +27,10 @@ CAM_SRC = {
     "cam_wrist_b": "observation/wrist_b/rgb",
 }
 TAC_SRC = {
-    "tac_left": "tactile/left_tactile/rgb",
-    "tac_right": "tactile/right_tactile/rgb",
-    "tac_left_b": "tactile/left_tactile_b/rgb",
-    "tac_right_b": "tactile/right_tactile_b/rgb",
+    "tac_left": "tactile/left_tactile/rgb_marker",
+    "tac_right": "tactile/right_tactile/rgb_marker",
+    "tac_left_b": "tactile/left_tactile_b/rgb_marker",
+    "tac_right_b": "tactile/right_tactile_b/rgb_marker",
 }
 JOINT_DIM = 8  # per arm: 7 joints + gripper finger0 (matches single-arm [0:8])
 OUT_ROOT = os.path.expanduser(os.environ.get("ACT_DATA_ROOT", "~/yifan_ws/act_data"))
