@@ -288,8 +288,8 @@ class Task(BaseTask):
         a_up = float(np.dot(ap.to_transformation_matrix()[:3, 2], np.array([0, 0, 1]))) > 0.75
         b_up = float(np.dot(bp.to_transformation_matrix()[:3, 2], np.array([0, 0, 1]))) > 0.75
         a_open, b_open, no_cup_welds, released = self._cups_released()
-        geom_ok = target_err < 0.035 and stack_err < 0.025 and height_err < 0.025 and a_up and b_up
-        if geom_ok and released:
+        stacked_upright = target_err < 0.035 and stack_err < 0.025 and height_err < 0.025 and a_up and b_up
+        if stacked_upright and released:
             self._success_hold_count = getattr(self, "_success_hold_count", 0) + 1
         else:
             self._success_hold_count = 0
@@ -303,13 +303,14 @@ class Task(BaseTask):
         self.metadata["gripper_b_open"] = b_open
         self.metadata["cups_unwelded"] = no_cup_welds
         self.metadata["released"] = released
+        self.metadata["stacked_upright"] = bool(stacked_upright)
         self.metadata["success_hold_count"] = int(self._success_hold_count)
         print(
             f"[PLACE_STACK] target_err={target_err*1000:.1f}mm "
             f"stack_err={stack_err*1000:.1f}mm dz={dz*1000:.1f}mm "
             f"height_err={height_err*1000:.1f}mm a_up={a_up} b_up={b_up} "
             f"a_open={a_open:.2f} b_open={b_open:.2f} unwelded={no_cup_welds} "
-            f"hold={self._success_hold_count}/{SUCCESS_HOLD_STEPS}",
+            f"stacked_upright={stacked_upright} hold={self._success_hold_count}/{SUCCESS_HOLD_STEPS}",
             flush=True,
         )
         return bool(self._success_hold_count >= SUCCESS_HOLD_STEPS)

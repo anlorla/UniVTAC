@@ -387,8 +387,8 @@ class Task(BaseTask):
         height_err = abs(float(p.p[2]) - float(PLACE_TARGET.p[2]))
         up = float(np.dot(p.to_transformation_matrix()[:3, 2], np.array([0, 0, 1]))) > 0.75
         b_open, no_cup_weld, released = self._cup_released_by_final_gripper()
-        geom_ok = target_err < 0.035 and height_err < 0.025 and up
-        if geom_ok and released:
+        on_plate_upright = target_err < 0.035 and height_err < 0.025 and up
+        if on_plate_upright and released:
             self._success_hold_count = getattr(self, "_success_hold_count", 0) + 1
         else:
             self._success_hold_count = 0
@@ -399,12 +399,13 @@ class Task(BaseTask):
         self.metadata["gripper_b_open"] = b_open
         self.metadata["cup_unwelded"] = no_cup_weld
         self.metadata["released"] = released
+        self.metadata["on_plate_upright"] = bool(on_plate_upright)
         self.metadata["success_hold_count"] = int(self._success_hold_count)
         print(
             f"[HANDOVER_PLACE] target_err={target_err*1000:.1f}mm "
             f"height_err={height_err*1000:.1f}mm up={up} "
             f"b_open={b_open:.2f} unwelded={no_cup_weld} "
-            f"hold={self._success_hold_count}/{SUCCESS_HOLD_STEPS}",
+            f"on_plate_upright={on_plate_upright} hold={self._success_hold_count}/{SUCCESS_HOLD_STEPS}",
             flush=True,
         )
         return bool(self._success_hold_count >= SUCCESS_HOLD_STEPS)
