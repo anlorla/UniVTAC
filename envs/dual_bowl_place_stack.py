@@ -45,6 +45,8 @@ PRE_GRIPPER_OPEN = 1.0                # 碗沿抓取: 先全开, 让两指能跨
 PLACE_HOVER     = 0.12                # 放置目标正上方的悬停高度
 RETRACT_Z       = 0.12                # 松爪后竖直撤离高度
 ARM_A_PARK_POS  = [0.40, 0.32, 0.26]  # A 放完下碗后退到 +Y 上方的停车位, 让开 B 臂
+SUCCESS_HOLD_STEPS   = 8               # 需连续 N 步维持"套叠正立 + 双爪释放"才计成功(仿 cup 版)
+GRIPPER_RELEASE_THRESH = 0.65          # 夹爪开合百分比 >= 此值视为已松开
 
 
 @configclass
@@ -156,6 +158,7 @@ class Task(BaseTask):
         self.bowl_a.set_pose(BOWL_A_START.add_offset(noise_a))
         self.bowl_b.set_pose(BOWL_B_START.add_offset(noise_b))
         self.metadata["target_pose"] = [float(v) for v in STACK_TARGET.p]
+        self._success_hold_count = 0
 
     # ---------------------------------------------------------------- helpers
     def _register_rim_grasp(self, actor, rim_dir):
@@ -202,6 +205,13 @@ class Task(BaseTask):
 
     def _unweld_actor(self, actor):
         self._welds = [w for w in self._welds if w[0] is not actor]
+
+    def _bowls_released(self):
+        # 两碗都真正脱手 = 两爪都张开 且 两碗都已 unweld(搬运焊接解除)。
+        a_open = float(self._robot_manager.get_gripper_percentage()) >= GRIPPER_RELEASE_THRESH
+        b_open = float(self._robot_manager_b.get_gripper_percentage()) >= GRIPPER_RELEASE_THRESH
+        no_bowl_welds = not any(w[0] is self.bowl_a or w[0] is self.bowl_b for w in self._welds)
+        return a_open, b_open, no_bowl_welds, bool(a_open and b_open and no_bowl_welds)
 
     def _release_bowl(self, actor, atom, arm, park=False, retract=True):
         self._unweld_actor(actor)
@@ -279,17 +289,31 @@ class Task(BaseTask):
         height_err = abs(dz - NEST_RISE)
         a_up = float(np.dot(ap.to_transformation_matrix()[:3, 2], np.array([0, 0, 1]))) > 0.75
         b_up = float(np.dot(bp.to_transformation_matrix()[:3, 2], np.array([0, 0, 1]))) > 0.75
+        a_open, b_open, no_bowl_welds, released = self._bowls_released()
+        # 碗比纸杯宽, 落点/套叠容差稍放宽。
+        stacked_upright = target_err < 0.04 and stack_err < 0.03 and height_err < 0.025 and a_up and b_up
+        if stacked_upright and released:
+            self._success_hold_count = getattr(self, "_success_hold_count", 0) + 1
+        else:
+            self._success_hold_count = 0
 
         self.metadata["bowl_a"] = [float(v) for v in ap.p]
         self.metadata["bowl_b"] = [float(v) for v in bp.p]
         self.metadata["target_err"] = target_err
         self.metadata["stack_err"] = stack_err
         self.metadata["height_err"] = height_err
+        self.metadata["gripper_a_open"] = a_open
+        self.metadata["gripper_b_open"] = b_open
+        self.metadata["bowls_unwelded"] = no_bowl_welds
+        self.metadata["released"] = released
+        self.metadata["stacked_upright"] = bool(stacked_upright)
+        self.metadata["success_hold_count"] = int(self._success_hold_count)
         print(
             f"[BOWL_STACK] target_err={target_err*1000:.1f}mm "
             f"stack_err={stack_err*1000:.1f}mm dz={dz*1000:.1f}mm "
-            f"height_err={height_err*1000:.1f}mm a_up={a_up} b_up={b_up}",
+            f"height_err={height_err*1000:.1f}mm a_up={a_up} b_up={b_up} "
+            f"a_open={a_open:.2f} b_open={b_open:.2f} unwelded={no_bowl_welds} "
+            f"stacked_upright={stacked_upright} hold={self._success_hold_count}/{SUCCESS_HOLD_STEPS}",
             flush=True,
         )
-        # 碗比纸杯宽, 落点/套叠容差稍放宽。
-        return bool(target_err < 0.04 and stack_err < 0.03 and height_err < 0.025 and a_up and b_up)
+        return bool(self._success_hold_count >= SUCCESS_HOLD_STEPS)

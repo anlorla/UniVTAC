@@ -46,6 +46,8 @@ GRASP_PRE_DIS = 0.12
 PLACE_HOVER = 0.10
 RETRACT_Z = 0.10
 ARM_A_PARK_POS = [0.36, 0.31, 0.24]
+SUCCESS_HOLD_STEPS = 8                 # 需连续 N 步维持"叠放正立 + 双爪释放"才计成功(仿 cup 版)
+GRIPPER_RELEASE_THRESH = 0.65          # 夹爪开合百分比 >= 此值视为已松开
 
 
 @configclass
@@ -152,6 +154,7 @@ class Task(BaseTask):
         self.plate_a.set_pose(PLATE_A_START.add_offset(noise_a))
         self.plate_b.set_pose(PLATE_B_START.add_offset(noise_b))
         self.metadata["target_pose"] = [float(v) for v in STACK_TARGET.p]
+        self._success_hold_count = 0
 
     # ---------------------------------------------------------------- helpers
     def _register_rim_grasp(self, actor, rim_dir):
@@ -194,6 +197,13 @@ class Task(BaseTask):
 
     def _unweld_actor(self, actor):
         self._welds = [w for w in self._welds if w[0] is not actor]
+
+    def _plates_released(self):
+        # 两盘都真正脱手 = 两爪都张开 且 两盘都已 unweld(搬运焊接解除)。
+        a_open = float(self._robot_manager.get_gripper_percentage()) >= GRIPPER_RELEASE_THRESH
+        b_open = float(self._robot_manager_b.get_gripper_percentage()) >= GRIPPER_RELEASE_THRESH
+        no_plate_welds = not any(w[0] is self.plate_a or w[0] is self.plate_b for w in self._welds)
+        return a_open, b_open, no_plate_welds, bool(a_open and b_open and no_plate_welds)
 
     def _release_plate(self, actor, atom, arm, park=False):
         self._unweld_actor(actor)
@@ -270,16 +280,30 @@ class Task(BaseTask):
         height_err = abs(dz - STACK_DZ)
         a_up = float(np.dot(ap.to_transformation_matrix()[:3, 2], np.array([0, 0, 1]))) > 0.8
         b_up = float(np.dot(bp.to_transformation_matrix()[:3, 2], np.array([0, 0, 1]))) > 0.8
+        a_open, b_open, no_plate_welds, released = self._plates_released()
+        stacked_upright = target_err < 0.04 and stack_err < 0.03 and height_err < 0.015 and a_up and b_up
+        if stacked_upright and released:
+            self._success_hold_count = getattr(self, "_success_hold_count", 0) + 1
+        else:
+            self._success_hold_count = 0
 
         self.metadata["plate_a"] = [float(v) for v in ap.p]
         self.metadata["plate_b"] = [float(v) for v in bp.p]
         self.metadata["target_err"] = target_err
         self.metadata["stack_err"] = stack_err
         self.metadata["height_err"] = height_err
+        self.metadata["gripper_a_open"] = a_open
+        self.metadata["gripper_b_open"] = b_open
+        self.metadata["plates_unwelded"] = no_plate_welds
+        self.metadata["released"] = released
+        self.metadata["stacked_upright"] = bool(stacked_upright)
+        self.metadata["success_hold_count"] = int(self._success_hold_count)
         print(
             f"[PLATE_STACK] target_err={target_err*1000:.1f}mm "
             f"stack_err={stack_err*1000:.1f}mm dz={dz*1000:.1f}mm "
-            f"height_err={height_err*1000:.1f}mm a_up={a_up} b_up={b_up}",
+            f"height_err={height_err*1000:.1f}mm a_up={a_up} b_up={b_up} "
+            f"a_open={a_open:.2f} b_open={b_open:.2f} unwelded={no_plate_welds} "
+            f"stacked_upright={stacked_upright} hold={self._success_hold_count}/{SUCCESS_HOLD_STEPS}",
             flush=True,
         )
-        return bool(target_err < 0.04 and stack_err < 0.03 and height_err < 0.015 and a_up and b_up)
+        return bool(self._success_hold_count >= SUCCESS_HOLD_STEPS)

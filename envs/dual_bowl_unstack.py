@@ -49,6 +49,7 @@ RIM_GRASP_DZ = BOWL_HALF - 0.006
 EXTRACT_RISE = 0.16                # 竖直抽出上碗的高度(再抬高些, 先明显脱离堆叠后再侧向搬运)
 RIM_DOWN_EXTRA = 0.020             # 竖直下探时再多压 20mm, 让胶垫更实地落到碗沿/内外壁上
 RELEASE_HOVER_Z = 0.16             # 放置区上方的明确悬停高度, 先到盘正上方再下放
+SUCCESS_HOLD_STEPS = 8             # 需连续 N 步维持"分离+双碗正立+落盘+松爪"才计成功(仿 cup_unstack)
 
 
 @configclass
@@ -146,6 +147,7 @@ class Task(BaseTask):
         self.bowl_a.set_pose(base)
         self.bowl_b.set_pose(Pose([base.p[0], base.p[1], base.p[2] + NEST_RISE + NEST_GAP], UPRIGHT))
         self.metadata['plate_xy'] = [float(PLATE_POSE.p[0]), float(PLATE_POSE.p[1])]
+        self._success_hold_count = 0
 
     # ---------------------------------------------------------------- helpers
     def _grasp_rim(self, actor, rm, atom, arm, rim_dir=(0, 1, 0), camera_up=(1, 0, 0),
@@ -258,20 +260,30 @@ class Task(BaseTask):
     def check_success(self):
         ap = self.bowl_a.get_pose()
         bp = self.bowl_b.get_pose()
-        # 拆开成功 = 两碗已分离 + 上碗正立 + 上碗落在目标盘范围内。
+        # 拆开成功 = 两碗分离 + 上碗正立 + 上碗落在目标盘范围内 + 原下碗未被绊倒 + 松爪释放。
         horiz = float(np.linalg.norm(np.array(ap.p[:2], dtype=float) - np.array(bp.p[:2], dtype=float)))
         separated = horiz > 0.12
         a_up = float(np.dot(ap.to_transformation_matrix()[:3, 2], np.array([0, 0, 1]))) > 0.7
         b_up = float(np.dot(bp.to_transformation_matrix()[:3, 2], np.array([0, 0, 1]))) > 0.6
+        bottom_ok = a_up   # 原下碗保持正立 = 抽出上碗时没把它绊倒
         plate_horiz = float(np.linalg.norm(np.array(bp.p[:2], dtype=float) - np.array(PLATE_POSE.p[:2], dtype=float)))
         on_plate = plate_horiz < (PLATE_R - BOWL_OUTER_R + 0.01)
+        pa = self._robot_manager.get_gripper_percentage()
+        released = pa > 0.9   # A gripper opened = bowl actually let go before success can count
+        success_now = separated and bottom_ok and b_up and on_plate and released
+        if success_now:
+            self._success_hold_count = getattr(self, '_success_hold_count', 0) + 1
+        else:
+            self._success_hold_count = 0
         self.metadata['bowl_a'] = [float(v) for v in ap.p]
         self.metadata['bowl_b'] = [float(v) for v in bp.p]
         self.metadata['horiz_sep'] = horiz
         self.metadata['bowl_b_to_plate_horiz'] = plate_horiz
+        self.metadata['bottom_ok'] = bool(bottom_ok)
+        self.metadata['released'] = bool(released)
+        self.metadata['success_hold_count'] = int(self._success_hold_count)
         print(f"[UNSTACK] horiz_sep={horiz*1000:.1f}mm plate_err={plate_horiz*1000:.1f}mm "
-              f"a_up={a_up} b_up={b_up} on_plate={on_plate} -> separated={separated}", flush=True)
-        pa = self._robot_manager.get_gripper_percentage()
-        released = pa > 0.9   # A gripper opened = bowl actually let go
-        print(f"[UNSTACK] gripperA={pa:.2f} released={released}", flush=True)
-        return bool(separated and b_up and on_plate and released)
+              f"a_up={a_up} b_up={b_up} on_plate={on_plate} separated={separated}", flush=True)
+        print(f"[UNSTACK-REL] gripperA={pa:.2f} released={released} bottom_ok={bottom_ok} "
+              f"hold={self._success_hold_count}/{SUCCESS_HOLD_STEPS}", flush=True)
+        return bool(self._success_hold_count >= SUCCESS_HOLD_STEPS)
