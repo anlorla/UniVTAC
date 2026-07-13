@@ -191,9 +191,9 @@ class CuroboPlanner:
         # UNIVTAC_IK_SEEDCFG=1: seed IK from the CURRENT joints (single seed) so the
         # solver converges to the nearest solution branch, avoiding null-space wrist
         # flips (J5/J7 jumping up to ~2 rad between frames at an identical EE pose).
-        # EE accuracy is unchanged -- this only removes cosmetic joint jitter. Opt-in.
+        # EE accuracy is unchanged -- removes joint jitter. DEFAULT ON (set UNIVTAC_IK_SEEDCFG=0 to disable).
         seed_config = None
-        if retract is not None and os.environ.get('UNIVTAC_IK_SEEDCFG', '0') == '1':
+        if retract is not None and os.environ.get('UNIVTAC_IK_SEEDCFG', '1') == '1':
             seed_config = retract.view(1, 1, -1)
         result = self.motion_gen.solve_ik(
             goal_pose_of_ee, retract_config=retract, seed_config=seed_config)

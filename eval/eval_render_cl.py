@@ -40,7 +40,14 @@ parser.add_argument("--print_only", action="store_true")
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 args_cli.enable_cameras = True
-args_cli.livestream = 2
+if os.environ.get('UNIVTAC_GUI'):
+    args_cli.livestream = 0
+    args_cli.headless = False
+elif os.environ.get('UNIVTAC_HEADLESS'):
+    args_cli.livestream = 0
+    args_cli.headless = True
+else:
+    args_cli.livestream = 2
 args_cli.num_envs = 1
 
 # ============ STEP 1: 连 VTA server（必须在 Isaac 之前，否则同步 ws connect 死锁） ============
@@ -117,6 +124,25 @@ def _pack_tac(t):
     return {'observation.images.tactile_a': to_u8(t["left_tactile"]["rgb"]),
             'observation.images.tactile_b': to_u8(t["right_tactile"]["rgb"])}
 
+def _env_int(name, default):
+    try:
+        return int(os.environ.get(name, str(default)) or default)
+    except ValueError:
+        return int(default)
+
+def _exec_slots(total_slots):
+    requested = _env_int('UNIVTAC_EXEC_SLOTS', 0)
+    return min(total_slots, requested) if requested > 0 else total_slots
+
+def _ticks_per_slot():
+    return max(1, _env_int('UNIVTAC_TICKS_PER_SLOT', 1))
+
+def _select_tactile_keyframes(tactile_frames):
+    keep = _env_int('UNIVTAC_TAC_KEYFRAMES', 0)
+    if keep > 0:
+        return tactile_frames[-keep:]
+    return tactile_frames
+
 def vta_eval(task, observation):
     """闭环：infer -> 执行动作块(每帧收关键帧) -> compute_kv_cache 用真实新观测+动作历史重新接地。"""
     global _VTA_FIRST
@@ -136,15 +162,20 @@ def vta_eval(task, observation):
                     _f.write(' '.join('%.4f' % _x for _x in _v) + '\n')
     except Exception: pass
     F = int(action.shape[1]); H = int(action.shape[2])
-    key_frame_list = []; last_tac = None
-    apf = max(1, H // 4)   # 视频每帧收4关键帧;触觉只留1帧(T_tac=1,tactile VAE cold,多帧崩avg_shortcut,触觉对齐是后续项)
+    key_frame_list = []; tac_frame_list = []
+    apf = max(1, H // 4)   # 视频每帧收4关键帧;触觉按相同关键帧节奏回灌,可用 UNIVTAC_TAC_KEYFRAMES 裁剪
     start_f = 1 if _VTA_FIRST else 0
     _VTA_FIRST = False
     for i in range(start_f, F):
-        for j in range(H):
+        for j in range(_exec_slots(H)):
             d = np.asarray(action[:, i, j]).reshape(-1)
             ee = torch.tensor(rot6d10_to_ee(d[:10]), dtype=torch.float32)
-            task.take_action(ee, action_type='ee_ik')
+            for _ in range(_ticks_per_slot()):
+                task.take_action(ee, action_type='ee_ik')
+                if getattr(task, "eval_success", False):
+                    break
+                if task.take_action_cnt >= task.cfg.step_lim:
+                    break
             if getattr(task, "eval_success", False):
                 return
             if task.take_action_cnt >= task.cfg.step_lim:
@@ -152,11 +183,11 @@ def vta_eval(task, observation):
             if (j + 1) % apf == 0:
                 kobs = task._get_observations()
                 key_frame_list.append(_pack_video(kobs["observation"]))
-                last_tac = _pack_tac(kobs["tactile"])   # 触觉只留最后1帧(T_tac=1)
+                tac_frame_list.append(_pack_tac(kobs["tactile"]))
     # 闭环接地：用真实新观测(关键帧)+真实执行的动作块写入 KV cache
     if key_frame_list:
         try:
-            client.infer({'obs': key_frame_list, 'tactile': [last_tac],
+            client.infer({'obs': key_frame_list, 'tactile': _select_tactile_keyframes(tac_frame_list),
                           'state': action, 'current_state': chunk_start_state,
                           'compute_kv_cache': True, 'imagine': False,
                           'prompt': args_cli.prompt})

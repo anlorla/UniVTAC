@@ -62,7 +62,8 @@ def worker_run(args, deploy_config, task_config, task_file_name, policy_name,
     # Build minimal args for app
     app_args = parser.parse_args([])  # empty to use defaults
     app_args.enable_cameras = True
-    app_args.livestream = 2
+    app_args.livestream = int(os.environ.get("UNIVTAC_LIVESTREAM", "0"))
+    app_args.headless = os.environ.get("UNIVTAC_GUI") is None
     app_args.num_envs = 1
 
     app_launcher = AppLauncher(app_args)
@@ -82,6 +83,9 @@ def worker_run(args, deploy_config, task_config, task_file_name, policy_name,
         env_cfg.obs_data_type = task_config.get("observations", {})
         env_cfg.save_frequency = task_config.get("save_frequency", env_cfg.save_frequency)
         env_cfg.video_frequency = task_config.get("video_frequency", env_cfg.video_frequency)
+        env_cfg.render_frequency = task_config.get("render_frequency", env_cfg.render_frequency)
+        env_cfg.random_texture = task_config.get("random_texture", False)
+        env_cfg.ground_plate_color = task_config.get("ground_plate_color", env_cfg.ground_plate_color)
         env_cfg.scene.num_envs = 1
 
         # Device stays default; CUDA env controls GPU routing
@@ -321,6 +325,7 @@ def main():
             next_seed += 1
 
         while any(p.is_alive() for p in workers):
+            done = progress.get('done', 0)
             # Drain results queue and log clean summaries
             while True:
                 try:
@@ -337,12 +342,10 @@ def main():
                         write_clean(f"{prefix} error; see out.log for traceback")
                     write_out(f"{prefix} result={event['result']} cost={event['cost']} steps={event['steps']} actions={event['actions']}")
 
+                    done = progress.get('done', 0)
                     if done < args.total_num:
-                        # Feed more seeds; try to keep queue non-empty
-                        # Put a few seeds per iteration to avoid starvation
-                        for _ in range(args.workers):
-                            seed_q.put(next_seed)
-                            next_seed += 1
+                        seed_q.put(next_seed)
+                        next_seed += 1
                     else:
                         # Signal workers to stop once target reached
                         for _ in range(args.workers):

@@ -143,8 +143,15 @@ class ACT:
                 print(f"Warning: Could not find stats file at {stats_path}")
                 self.stats = None
 
-            # Load policy weights
-            ckpt_path = os.path.join(ckpt_dir, "policy_last.ckpt")
+            # Load policy weights. Evaluation scripts check for policy_best.ckpt,
+            # so use it by default and keep policy_last.ckpt as a fallback.
+            ckpt_name = os.environ.get("CKPT_NAME", "policy_best.ckpt")
+            ckpt_path = os.path.join(ckpt_dir, ckpt_name)
+            if not os.path.exists(ckpt_path) and ckpt_name != "policy_last.ckpt":
+                fallback_path = os.path.join(ckpt_dir, "policy_last.ckpt")
+                if os.path.exists(fallback_path):
+                    print(f"Warning: Could not find {ckpt_path}; falling back to {fallback_path}")
+                    ckpt_path = fallback_path
             print("current pwd:", os.getcwd())
             if os.path.exists(ckpt_path):
                 loading_status = self.policy.load_state_dict(torch.load(ckpt_path))

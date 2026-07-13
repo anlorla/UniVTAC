@@ -56,6 +56,8 @@ AppLauncher.add_app_launcher_args(parser)
 
 # parse the arguments
 args_cli.enable_cameras = True
+args_cli.livestream = int(os.environ.get("UNIVTAC_LIVESTREAM", "0"))
+args_cli.headless = os.environ.get("UNIVTAC_GUI") is None
 args_cli.num_envs = 1
 
 def get_config(file, default_root:Path, type:Literal['yaml', 'json']):
@@ -82,7 +84,7 @@ task_config, task_config_file = get_config(
     type='yaml'
 )
 
-if task_config.get('render_frequency', 1) == 0:
+if task_config.get('render_frequency', 1) == 0 and args_cli.livestream == 1:
     args_cli.livestream = 2
 
 # launch omniverse app, must done before importing anything from omni.isaac
@@ -189,7 +191,16 @@ def main():
     env_cfg.video_frequency = task_config.get("video_frequency", env_cfg.video_frequency)
     env_cfg.render_frequency = task_config.get("render_frequency", env_cfg.render_frequency)
     env_cfg.obs_data_type = task_config.get("observations", {})
+    # [PATCH-G] convenience flag: `gel_particle: true` collects the markerless "gel + speckle"
+    # tactile image alongside whatever else is configured (e.g. rgb_marker), at the SAME
+    # 320x240 sensor resolution as the marker version. Equivalent to adding 'gel_particle' to
+    # observations.tactile, but flippable on any existing (marker-based) collection config.
+    if task_config.get("gel_particle", False):
+        tac = env_cfg.obs_data_type.setdefault("tactile", [])
+        if "gel_particle" not in tac:
+            tac.append("gel_particle")
     env_cfg.random_texture = task_config.get("random_texture", False)
+    env_cfg.ground_plate_color = task_config.get("ground_plate_color", env_cfg.ground_plate_color)
 
     env_cfg.scene.num_envs = 1
     

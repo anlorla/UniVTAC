@@ -366,4 +366,8 @@ class Task(BaseTask):
                 f"up={up:.3f} placed={placed}",
                 flush=True,
             )
-        return bool(all(ok))
+        pa = self._robot_manager.get_gripper_percentage()
+        pb = self._robot_manager_b.get_gripper_percentage()
+        released = pa > 0.9   # A (final placer) released; B idle-neutral ~0.5 after releasing gear_1 earlier
+        print(f"[GEAR] gripperA={pa:.2f} gripperB={pb:.2f} released={released}", flush=True)
+        return bool(all(ok) and released)

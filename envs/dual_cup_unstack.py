@@ -43,6 +43,7 @@ CUP_B_GRASP_DZ = CUP_HALF - 0.006     # A 顶抓上杯: 抓在上杯口沿(最�
 EXTRACT_RISE   = 0.13     # B 竖直抽出上杯的高度(> 套叠重叠+杯高余量, 确保完全脱离)
 NEST_GAP       = 0.005    # 初始套叠留的小竖直间隙: 两个 UIPC 薄壳杯若初始穿透, IPC 接触势爆炸
                           # -> reset 每步~26s 直接超时。留间隙让其轻轻落入而非初始穿透。
+SUCCESS_HOLD_STEPS = 8
 
 
 @configclass
@@ -133,6 +134,7 @@ class Task(BaseTask):
         base = STACK_POS.add_offset(noise)
         self.cup_a.set_pose(base)
         self.cup_b.set_pose(Pose([base.p[0], base.p[1], base.p[2] + NEST_RISE + NEST_GAP], UPRIGHT))
+        self._success_hold_count = 0
 
     # ---------------------------------------------------------------- helpers
     def _grasp(self, actor, rm, atom, arm, dz, grasp_from=(0, 0, 1), camera_up=(1, 0, 0),
@@ -196,8 +198,9 @@ class Task(BaseTask):
         hover = PLACE_POSE.add_bias([0.0, 0.0, 0.10])     # 放置点正上方 10cm 悬停
         self._place_inhand(self.cup_b, self._robot_manager, self.atom_a, hover, 'a')
         self._dbg("A 移到放置点上方")
-        self.move(self.atom_a.move_by_displacement(z=-0.085, xyz_coord='world'),
-                  arm='a', time_dilation_factor=0.5)       # 下放贴桌
+        self.move(self.atom_a.move_by_displacement(z=-0.10, xyz_coord='world'),
+                  arm='a', time_dilation_factor=0.5)       # 修:降到 PLACE_POSE.z(原-0.085只降到上方15mm半空松爪)
+        self.delay(8, is_save=True)                         # 落稳再松爪
         self.move(self.atom_a.open_gripper(1.0), arm='a')  # 松爪释放上杯
         self._dbg("A 放下上杯并松爪")
         self.delay(25, is_save=True)
@@ -206,7 +209,7 @@ class Task(BaseTask):
     def check_success(self):
         ap = self.cup_a.get_pose()
         bp = self.cup_b.get_pose()
-        # 拆开成功 = 两杯水平分离(不再同轴套叠) + 上杯仍基本正立(没被甩翻)。
+        # 拆开成功 = 两杯水平分离 + 上杯放稳 + 原下杯未被绊倒。
         horiz = float(np.linalg.norm(np.array(ap.p[:2], dtype=float) - np.array(bp.p[:2], dtype=float)))
         separated = horiz > 0.12
         a_up = float(np.dot(ap.to_transformation_matrix()[:3, 2], np.array([0, 0, 1]))) > 0.7
@@ -214,6 +217,24 @@ class Task(BaseTask):
         self.metadata['cup_a'] = [float(v) for v in ap.p]
         self.metadata['cup_b'] = [float(v) for v in bp.p]
         self.metadata['horiz_sep'] = horiz
+        self.metadata['cup_a_upright'] = bool(a_up)
+        self.metadata['cup_b_upright'] = bool(b_up)
         print(f"[UNSTACK] horiz_sep={horiz*1000:.1f}mm a_up={a_up} b_up={b_up} "
               f"-> separated={separated}", flush=True)
-        return bool(separated and b_up)
+        placed = float(bp.p[2]) < (TABLE_TOP + CUP_HALF + 0.035)   # top cup set down on table, not held aloft
+        self.metadata['cup_b_z'] = float(bp.p[2])
+        pa = self._robot_manager.get_gripper_percentage()
+        released = pa > 0.9   # A gripper opened = cup actually let go before success can count
+        bottom_ok = a_up
+        success_now = separated and bottom_ok and b_up and placed and released
+        if success_now:
+            self._success_hold_count = getattr(self, '_success_hold_count', 0) + 1
+        else:
+            self._success_hold_count = 0
+        self.metadata['released'] = bool(released)
+        self.metadata['bottom_ok'] = bool(bottom_ok)
+        self.metadata['success_hold_count'] = int(self._success_hold_count)
+        print(f"[UNSTACK-REL] cup_b_z={float(bp.p[2])*1000:.0f}mm gripperA={pa:.2f} "
+              f"placed={placed} released={released} bottom_ok={bottom_ok} "
+              f"hold={self._success_hold_count}/{SUCCESS_HOLD_STEPS}", flush=True)
+        return bool(self._success_hold_count >= SUCCESS_HOLD_STEPS)

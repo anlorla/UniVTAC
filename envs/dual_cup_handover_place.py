@@ -65,6 +65,8 @@ ARM_B_RETRACT_POS = [0.46, -0.32, 0.24]
 ARM_B_SIDE_STAGE_POS = [0.50, -0.20, 0.28]
 B_RELEASE_OPEN = 0.82
 B_RELEASE_SIDE_RETREAT = 0.055
+GRIPPER_RELEASE_THRESH = 0.65
+SUCCESS_HOLD_STEPS = 8
 
 
 @configclass
@@ -192,6 +194,7 @@ class Task(BaseTask):
         self.cup.set_pose(CUP_START.add_offset(noise))
         self.target_plate.set_pose(TARGET_PLATE_POS)
         self.planner_anchor.set_pose(PLANNER_ANCHOR_POS)
+        self._success_hold_count = 0
         self.metadata["handover_target"] = [float(v) for v in HANDOVER_TARGET.p]
         self.metadata["place_target"] = [float(v) for v in PLACE_TARGET.p]
         self.metadata["target_plate"] = [float(v) for v in TARGET_PLATE_POS.p]
@@ -309,6 +312,11 @@ class Task(BaseTask):
         self.move(atom.close_gripper(close_width, depth_threshold=None), arm=arm)
         self.delay(8, is_save=True)
 
+    def _cup_released_by_final_gripper(self):
+        b_open = float(self._robot_manager_b.get_gripper_percentage()) >= GRIPPER_RELEASE_THRESH
+        no_cup_weld = not any(w[0] is self.cup for w in self._welds)
+        return b_open, no_cup_weld, bool(b_open and no_cup_weld)
+
     def _place_inhand(self, rm, atom, target_pose, arm):
         inhand = self.cup.get_pose().rebase(rm.get_gripper_center_pose())
         gc_mat = np.array(target_pose.to_transformation_matrix()) @ np.linalg.inv(
@@ -422,13 +430,27 @@ class Task(BaseTask):
         target_err = float(np.linalg.norm(cup_xy - target_xy))
         height_err = abs(float(p.p[2]) - float(PLACE_TARGET.p[2]))
         up = float(np.dot(p.to_transformation_matrix()[:3, 2], np.array([0, 0, 1]))) > 0.75
+        b_open, no_cup_weld, released = self._cup_released_by_final_gripper()
+        on_plate_upright = target_err < 0.035 and height_err < 0.025 and up
+        if on_plate_upright and released:
+            self._success_hold_count = getattr(self, "_success_hold_count", 0) + 1
+        else:
+            self._success_hold_count = 0
 
         self.metadata["cup"] = [float(v) for v in p.p]
         self.metadata["target_err"] = target_err
         self.metadata["height_err"] = height_err
+        self.metadata["gripper_b_open"] = b_open
+        self.metadata["cup_unwelded"] = no_cup_weld
+        self.metadata["released"] = released
+        self.metadata["on_plate_upright"] = bool(on_plate_upright)
+        self.metadata["success_hold_count"] = int(self._success_hold_count)
         print(
             f"[HANDOVER_PLACE] target_err={target_err*1000:.1f}mm "
-            f"height_err={height_err*1000:.1f}mm up={up}",
+            f"height_err={height_err*1000:.1f}mm up={up} "
+            f"b_open={b_open:.2f} unwelded={no_cup_weld} "
+            f"on_plate_upright={on_plate_upright} hold={self._success_hold_count}/{SUCCESS_HOLD_STEPS}",
             flush=True,
         )
-        return bool(target_err < 0.035 and height_err < 0.025 and up)
+        # 用我的判据: B 把杯放到盘上正立即成功(本任务 B 放盘【不松爪】, 不要求 released)。
+        return bool(on_plate_upright)
