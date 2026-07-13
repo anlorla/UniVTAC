@@ -1,0 +1,22 @@
+# Record ONE particle visuo-tactile demo per task.
+# 视频帧 = head 第三视角 + 每个 gel 的粒子视触觉面板(gel_particle: 无 marker 的银灰 gel 图,
+# 由真实 FEM 表面位移驱动斑点运动)。必须配 UNIVTAC_PANEL=particle。
+#   UNIVTAC_PANEL=particle python scripts/collect_data.py <task> record_particle
+# 输出: data/<task>/record_particle/video/<seed>_success.mp4
+save_dir: ./data
+decimation: 1
+save_frequency: 10        # 只求视频, hdf5 存得很稀(仅副产物)
+video_frequency: 1        # 每步一帧 -> 流畅
+render_frequency: 0       # headless(录制帧仍会渲染相机)
+random_texture: false
+use_seed: true
+dense_gelpad: false       # 粗网格 169(快); demo 足够
+episode_num: 1            # 采到 1 条成功即停...
+start_seed: 0
+max_seed: 30              # ...最多试到 seed 30 拿一条干净成功
+sensor_type: gsmini
+observations:
+  camera: ['rgb']
+  tactile: ['gel_particle']   # 粒子视触觉图(驱动视频面板); 不存原始 tactile/depth/force
+  embodiment: ['joint', 'ee']
+  actor: true

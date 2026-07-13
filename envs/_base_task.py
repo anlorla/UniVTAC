@@ -225,11 +225,13 @@ class BaseTask(UipcRLEnv):
         self.cfg = cfg
         self.render_outdated = True
 
-        # 海报模式(UNIVTAC_POSTER_VIEW=1): 帧只含第三视角(head)+ 触觉, 去掉腕相机。
+        # 海报模式(UNIVTAC_POSTER_VIEW=1) / 特殊触觉面板(UNIVTAC_PANEL=force|particle): 帧只含第三视角
+        # (head) + 触觉面板, 去掉腕相机。UNIVTAC_PANEL 决定面板贴什么:
+        #   force    -> force_field_img (力场可视化: 法向黑->绿->红 + 白色剪切箭头)
+        #   particle -> gel_particle    (无 marker 的银灰 gel 视触觉图, 真实 FEM 表面位移驱动)
         # 触觉每列上下两个: 单臂 2 个 -> 1 列(160), 双臂 4 个 -> 2 列(320)。
-        # 帧宽 = 480(head) + 160*列数 -> 单臂 640, 双臂 800; 高 320。
-        # 同步把 video_size 改成该尺寸, 否则 VideoHandler 会拉伸帧造成变形。
-        if os.environ.get('UNIVTAC_POSTER_VIEW', '0') == '1':
+        # 帧宽 = 480(head) + 160*列数 -> 单臂 640, 双臂 800; 高 320。同步改 video_size 否则会拉伸变形。
+        if os.environ.get('UNIVTAC_POSTER_VIEW', '0') == '1' or os.environ.get('UNIVTAC_PANEL', ''):
             cols = 2 if getattr(cfg, 'dual_arm', False) else 1
             cfg.video_size = (480 + 160 * cols, 320)
 
@@ -570,14 +572,19 @@ class BaseTask(UipcRLEnv):
             return torchvision.transforms.Resize((320, 480))(
                 obs['observation'][name]['rgb'].clone().permute(2, 0, 1)).permute(1, 2, 0)
 
-        def tac(name):
-            return torchvision.transforms.Resize((tac_size, tac_size))(
-                obs['tactile'][name]['rgb_marker'].clone().permute(2, 0, 1)).permute(1, 2, 0)
-
         poster = os.environ.get('UNIVTAC_POSTER_VIEW', '0') == '1'
+        # UNIVTAC_PANEL 选触觉面板贴什么: force->force_field_img, particle->gel_particle, 默认 rgb_marker。
+        panel = os.environ.get('UNIVTAC_PANEL', '')
+        tac_key = {'force': 'force_field_img', 'particle': 'gel_particle'}.get(panel, 'rgb_marker')
+        head_only = poster or panel in ('force', 'particle')
+
+        def tac(name):
+            src = obs['tactile'][name][tac_key].clone().permute(2, 0, 1)
+            return torchvision.transforms.Resize((tac_size, tac_size))(src).permute(1, 2, 0).to(first.dtype)
+
         # 相机面板: 默认 head + 所有腕相机(单臂 wrist, 双臂 wrist + wrist_b) + 可选 global 辅助视角;
-        # 海报模式只保留第三视角(head)。
-        cam_order = ['head'] if poster else ['head', 'wrist', 'wrist_b', 'global']
+        # 海报/特殊触觉面板视图只保留第三视角(head)。
+        cam_order = ['head'] if head_only else ['head', 'wrist', 'wrist_b', 'global']
         cam_names = [n for n in cam_order
                      if n in obs['observation'] and 'rgb' in obs['observation'][n]]
         # 触觉: 单臂 2(left/right), 双臂 4(再加 *_b) —— 海报模式也全保留(双臂要两条臂的触觉)。

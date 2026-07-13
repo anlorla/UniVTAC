@@ -1,0 +1,23 @@
+# Record ONE force-visualization demo per task.
+# 视频帧 = head 第三视角 + 每个 gel 的力场可视化面板(force_field_img: 法向黑->绿->红 + 白色剪切箭头)。
+# 必须配 UNIVTAC_FORCE_VIEW=1 -> get_frame_shot 把触觉面板换成 force_field_img。
+#   UNIVTAC_FORCE_VIEW=1 python scripts/collect_data.py <task> record_force
+# 输出: data/<task>/record_force/video/<seed>_success.mp4
+save_dir: ./data
+decimation: 1
+save_frequency: 10        # 只求视频, hdf5 存得很稀(仅副产物)
+video_frequency: 1        # 每步一帧 -> 流畅
+render_frequency: 0       # headless(录制帧仍会渲染相机)
+random_texture: false
+use_seed: true
+dense_gelpad: false       # 粗网格 169(快); demo 力场足够
+force_field_grid: [64, 48]
+episode_num: 1            # 采到 1 条成功即停...
+start_seed: 0
+max_seed: 30              # ...最多试到 seed 30 拿一条干净成功
+sensor_type: gsmini
+observations:
+  camera: ['rgb']
+  tactile: ['force_field_img']   # 力场可视化(驱动视频面板); 不存原始 tactile/depth
+  embodiment: ['joint', 'ee']
+  actor: true

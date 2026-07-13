@@ -6,8 +6,9 @@ import torch
 # Dual Bowl PLACE-STACK —— 双臂叠放陶碗 (仿 dual_cup_place_stack, 物体换成碗):
 #   初始: 两只碗分别放在左右两侧桌面, 碗口朝 local +Z, 闭底朝 -Z。
 #   流程: A 抓 bowl_a 搬到中间目标位放下; B 抓 bowl_b 放到 bowl_a 正上方形成套叠。
-#     bowl_a/bowl_b : assets/objects/BOWL.usd (⌀130mm 浅口陶碗, 5mm 壁, 带圈足;
+#     bowl_a/bowl_b : assets/objects/BOWL_STACK.usd (⌀130mm×H58 竖直外壁碗, 圆弧圈足;
 #       碗口朝 local +Z, 闭底 -Z, 体心居中; USD 已是实尺 -> scale=1.0)
+#       (注意: 与 dual_bowl_unstack 用的 BOWL.usd 是两个资产 —— 那个是原始 H39.4 浅碗, 别混。)
 #   与纸杯版的关键区别 (同 dual_bowl_unstack):
 #     碗口 ⌀130mm > 夹爪最大开度, 无法整只跨抱 -> 必须只夹住【碗沿】一侧
 #     (一指落碗内壁、一指碗外壁, 沿径向钳夹口下约 5mm 处约 5mm 厚的碗壁)。
@@ -149,13 +150,13 @@ class Task(BaseTask):
         # 只需比上碗略重, 好当底座不被套入时撞飞。
         self.bowl_a = self._actor_manager.add_from_usd_file(
             name="bowl_a",
-            asset_path="BOWL.usd",
+            asset_path="BOWL_STACK.usd",
             pose=BOWL_A_START,
             density=1e4,
         )
         self.bowl_b = self._actor_manager.add_from_usd_file(
             name="bowl_b",
-            asset_path="BOWL.usd",
+            asset_path="BOWL_STACK.usd",
             pose=BOWL_B_START,
             density=5e3,
         )
