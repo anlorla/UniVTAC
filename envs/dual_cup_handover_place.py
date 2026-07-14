@@ -32,8 +32,8 @@ GAP = 0.006
 # ---- 摆位 (世界系) ----
 UPRIGHT = [1, 0, 0, 0]
 CUP_START = Pose([0.40, 0.22, TABLE_TOP + CUP_HALF + GAP], UPRIGHT)
-HANDOVER_TARGET = Pose([0.50, 0.02, 0.17], UPRIGHT)
-TARGET_PLATE_POS = Pose([0.50, -0.26, TABLE_TOP + PLATE_HALF_Z], UPRIGHT)
+HANDOVER_TARGET = Pose([0.50, 0.02, 0.20], UPRIGHT)   # ≈两臂正中(y=0.02, 反推自数据), 抬高到0.20
+TARGET_PLATE_POS = Pose([0.50, -0.26, TABLE_TOP + PLATE_HALF_Z], UPRIGHT)   # B 侧目标盘(B 把杯放到这)
 PLACE_TARGET = Pose([TARGET_PLATE_POS.p[0], TARGET_PLATE_POS.p[1], TABLE_TOP + 2 * PLATE_HALF_Z + CUP_HALF + GAP], UPRIGHT)
 PLANNER_ANCHOR_POS = Pose([0.82, 0.38, TABLE_TOP + PLATE_HALF_Z], UPRIGHT)
 
@@ -46,7 +46,17 @@ GRASP_PRE_DIS = 0.12
 SIDE_GRASP_PRE_DIS = 0.08
 PRE_GRIPPER_OPEN = 0.62
 SIDE_PRE_GRIPPER_OPEN = 0.82
-SIDE_CLOSE_GRIPPER_POS = 0.70
+SIDE_CLOSE_GRIPPER_POS = 0.60   # B 侧抓闭合(参考 pour_ball 的 0.60: 夹牢又不挤形)
+USE_WELD = False   # False: 杯子全程只靠夹爪接触夹持(不 weld 刚性绑定); True: 恢复原来的 weld 行为
+A_GRASP_CLOSE = 0.5      # A 抓杯顶闭合量(两指压住杯口外壁; 全闭会挤穿软杯)
+A_TOP_GRASP_DZ = CUP_HALF - 0.006   # A 抓取高度: 杯顶口沿(最高、完全露出), 相对杯体心
+A_GRASP_OPEN = 1.0       # 抓前全张开, 清过杯口直径(~70mm < 夹爪最大 78mm)再合拢
+A_GRASP_SIDE = 0.10      # 两段式下降: 先退开(沿接近轴)这么多, 最后受约束直线进刀
+A_GRASP_UP = 0.06        # 两段式下降: 侧上方额外抬高量
+B_GRASP_DZ = 0.0         # B 侧接高度: 杯身中部(相对杯体心)
+B_GRASP_SIDE = 0.05      # B 两段式侧接: 退开短些(杯被A举着固定, 进刀短更好规划)
+B_GRASP_UP = 0.06        # B 两段式侧接: 预备位额外抬高
+A_LIFT_UP = 0.12       # A 抓住后先竖直上抬这么多, 再横移到交接位(比斜着直接搬更不易掉杯)
 HANDOVER_HOVER = 0.08
 PLACE_HOVER = 0.11
 RETRACT_Z = 0.10
@@ -120,7 +130,10 @@ class TaskCfg(BaseTaskCfg):
             update_period=1 / 120,
         ),
     ]
-    step_lim = 1500
+    # A 改两段式抓取后整条轨迹更长(~1500+步), 提高上限, 否则 record_one(每步存)会在
+    # save_count>1000 时强制 plan_success=False, 把 B 抓到之后的松手/放置全截断。
+    step_lim = 2400
+    max_save_frames = 2400
     reset_time_limit = 1200.0
 
 
@@ -247,12 +260,57 @@ class Task(BaseTask):
             self._set_weld(self.cup, rm)
         self.delay(8, is_save=True)
 
+    def _grasp_cup_top_staged(self, atom, rm, arm, grasp_from=(0.0, 0.0, 1.0),
+                              camera_up=(1.0, 0.0, 0.0), dz=A_TOP_GRASP_DZ,
+                              open_amt=A_GRASP_OPEN, close_width=A_GRASP_CLOSE,
+                              side=A_GRASP_SIDE, up=A_GRASP_UP, weld=False):
+        """两段式下降抓【杯顶口沿】(照搬 dual_cup_stack._grasp 的稳定下压):
+           夹爪中心对准杯轴(grasp_r=0), 全张开 -> 到抓取点侧上方(沿接近轴退 side + 抬 up)
+           -> 竖直降到侧位 -> 沿夹爪局部 z 锁 5 轴直线进刀 side(纯直线下压, 不砸不冲) -> 闭合。"""
+        gf = np.array(grasp_from, dtype=float); gf = gf / np.linalg.norm(gf)
+        self.move(atom.open_gripper(open_amt), arm=arm)
+        target = self.cup.get_pose().add_bias([0.0, 0.0, dz], coord="world")
+        gc = construct_grasp_pose(np.array(target.p, dtype=float), gf,
+                                  np.array(camera_up, dtype=float))
+        gc_side = gc.add_bias((gf * side).tolist(), coord="world")
+        ee_side = rm.gripper_center_to_ee(gc_side)
+        ee_high = ee_side.add_bias([0.0, 0.0, up], coord="world")
+        self.move(atom.move_to_pose(ee_high), arm=arm)                   # 1) 侧上方
+        self.move(atom.move_to_pose(ee_side), arm=arm)                   # 2) 竖直降到侧位
+        self.move(atom.move_by_displacement(z=side + 0.005, xyz_coord="local"),
+                  arm=arm, constraint_pose=[1, 1, 1, 1, 1, 0], time_dilation_factor=0.5)  # 3) 直线进刀
+        self.move(atom.close_gripper(close_width, depth_threshold=None), arm=arm)         # 4) 闭合
+        if weld:
+            self._set_weld(self.cup, rm)
+        self.delay(8, is_save=True)
+
     def _set_weld(self, actor, rm):
         self._unweld_actor(actor)
-        self.weld_actor(actor, rm)
+        if USE_WELD:
+            self.weld_actor(actor, rm)
 
     def _unweld_actor(self, actor):
         self._welds = [w for w in self._welds if w[0] is not actor]
+
+    def _receive_cup_side(self, atom, rm, arm, approach=(0.0, -1.0, 0.0),
+                          camera_up=(0.0, 0.0, 1.0), dz=0.0, pre_back=0.14, into=0.015,
+                          open_amt=SIDE_PRE_GRIPPER_OPEN, close_width=SIDE_CLOSE_GRIPPER_POS):
+        """B 侧向接 A 举在空中的杯子。杯已被 A 固定, 不怕碰倒 -> 全程用 move_to_pose 让 curobo
+           规划整条轨迹(比受约束直线进刀稳、不易规划失败):
+             张爪 -> 沿接近方向退开 pre_back 的预备位 -> 直接到抓取位(夹爪中心对准杯轴) -> 闭合。"""
+        ad = np.array(approach, dtype=float); ad = ad / np.linalg.norm(ad)
+        self.move(atom.open_gripper(open_amt), arm=arm)
+        target = self.cup.get_pose().add_bias([0.0, 0.0, dz], coord="world")
+        gc = construct_grasp_pose(np.array(target.p, dtype=float), ad,
+                                  np.array(camera_up, dtype=float))
+        gc_pre = gc.add_bias((ad * pre_back).tolist(), coord="world")     # 退开的预备位
+        gc_grip = gc.add_bias(((-ad) * into).tolist(), coord="world")     # 再往杯子靠一点点(过杯心)
+        self.move(atom.move_to_pose(rm.gripper_center_to_ee(gc_pre)), arm=arm,
+                  time_dilation_factor=0.5)
+        self.move(atom.move_to_pose(rm.gripper_center_to_ee(gc_grip)), arm=arm,
+                  time_dilation_factor=0.5)
+        self.move(atom.close_gripper(close_width, depth_threshold=None), arm=arm)
+        self.delay(8, is_save=True)
 
     def _cup_released_by_final_gripper(self):
         b_open = float(self._robot_manager_b.get_gripper_percentage()) >= GRIPPER_RELEASE_THRESH
@@ -292,12 +350,14 @@ class Task(BaseTask):
         self,
         atom,
         arm,
-        open_width=0.45,
+        open_width=1.0,
         retract=True,
         park_pos=None,
         side_retreat_y=0.0,
     ):
+        # 先【完全张开】夹爪并停一下, 确保杯子稳稳交到对臂手里, 再移走(否则半开就退会把杯带歪/带走)。
         self.move(atom.open_gripper(open_width), arm=arm)
+        self.delay(10, is_save=True)
         if side_retreat_y != 0.0:
             self.move(
                 atom.move_by_displacement(y=side_retreat_y, xyz_coord="world"),
@@ -316,7 +376,12 @@ class Task(BaseTask):
 
     def _dbg(self, tag):
         p = self.cup.get_pose()
-        print(f"[HANDOVER_PLACE] {tag}: cup=({p.p[0]:.3f},{p.p[1]:.3f},{p.p[2]:.3f})", flush=True)
+        ga = float(self._robot_manager.get_gripper_qpos())
+        gb = float(self._robot_manager_b.get_gripper_qpos())
+        bp = self._robot_manager_b.get_gripper_center_pose()
+        print(f"[HANDOVER_PLACE] {tag}: cup=({p.p[0]:.3f},{p.p[1]:.3f},{p.p[2]:.3f}) "
+              f"plan_ok={self.plan_success} gripA={ga:.4f} gripB={gb:.4f} "
+              f"B_tcp=({bp.p[0]:.3f},{bp.p[1]:.3f},{bp.p[2]:.3f})", flush=True)
 
     # ---------------------------------------------------------------- script
     def pre_move(self):
@@ -324,8 +389,13 @@ class Task(BaseTask):
         self._dbg("reset settled")
 
     def _play_once(self):
-        # A: 从桌上抓杯并移动到交接位。沿 +Y 杯壁抓取, 复用叠杯任务中稳定的侧壁抓法。
-        self._grasp_cup(self.atom_a, self._robot_manager, "a", rim_dir=(0, 1, 0), weld=True)
+        # A: 两段式下降抓【杯顶口沿】(学 dual_cup_stack 的稳定直线下压), 夹爪中心对准杯轴。
+        self._grasp_cup_top_staged(self.atom_a, self._robot_manager, "a", weld=USE_WELD)
+        # 抓住后先竖直上抬(锁住其余 5 轴 -> 纯 +Z), 再横移到交接位上方, 最后下到交接位。
+        self.move(
+            self.atom_a.move_by_displacement(z=A_LIFT_UP, xyz_coord="world"),
+            arm="a", constraint_pose=[1, 1, 1, 1, 1, 0], time_dilation_factor=0.5,
+        )
         self._place_inhand(
             self._robot_manager,
             self.atom_a,
@@ -335,47 +405,21 @@ class Task(BaseTask):
         self._place_inhand(self._robot_manager, self.atom_a, HANDOVER_TARGET, "a")
         self._dbg("A moved cup to handover")
 
-        # B: 从 -Y 侧水平接杯。先到抬高的横向预备姿态, 再让 grasp_actor 直线靠近。
-        # 侧抓时目标用杯子中心轴而不是杯壁边缘: 夹爪中心在杯轴线上, 两指闭合到杯壁。
-        self._move_side_stage()
-        self._grasp_cup(
-            self.atom_b,
-            self._robot_manager_b,
-            "b",
-            rim_dir=(0, -1, 0),
-            weld=False,
-            grasp_from=(0, -1, 0),
-            camera_up=(0, 0, 1),
-            grasp_r=SIDE_GRASP_R,
-            grasp_dz=SIDE_GRASP_DZ,
-            open_width=SIDE_PRE_GRIPPER_OPEN,
-            close_width=SIDE_CLOSE_GRIPPER_POS,
-            pre_dis=SIDE_GRASP_PRE_DIS,
-        )
-        self._set_weld(self.cup, self._robot_manager_b)
+        # ---- B: 侧向接杯 ----
+        self._receive_cup_side(self.atom_b, self._robot_manager_b, "b", dz=B_GRASP_DZ, pre_back=0.08)
+        if USE_WELD:
+            self._set_weld(self.cup, self._robot_manager_b)
         self.delay(5, is_save=True)
-        self._release_arm(self.atom_a, "a", retract=True, park_pos=ARM_A_PARK_POS)
+        self._release_arm(self.atom_a, "a", retract=True, park_pos=ARM_A_PARK_POS)   # A 完全张开松手退避
         self._dbg("B received cup, A released")
 
-        # B: 将杯子移动并放到右侧目标位。
+        # ---- B: 把杯子放到盘子上 —— 放到位即结束, 不松手、不退避 ----
         self._place_inhand(
-            self._robot_manager_b,
-            self.atom_b,
-            PLACE_TARGET.add_bias([0.0, 0.0, PLACE_HOVER], coord="world"),
-            "b",
+            self._robot_manager_b, self.atom_b,
+            PLACE_TARGET.add_bias([0.0, 0.0, PLACE_HOVER], coord="world"), "b",
         )
         self._place_inhand(self._robot_manager_b, self.atom_b, PLACE_TARGET, "b")
-        self._unweld_actor(self.cup)
-        self.delay(5, is_save=True)
-        self._release_arm(
-            self.atom_b,
-            "b",
-            open_width=B_RELEASE_OPEN,
-            retract=True,
-            park_pos=ARM_B_RETRACT_POS,
-            side_retreat_y=-B_RELEASE_SIDE_RETREAT,
-        )
-        self._dbg("B placed cup")
+        self._dbg("B placed cup on plate")
         self.delay(30, is_save=True)
 
     # ---------------------------------------------------------------- success
@@ -408,4 +452,5 @@ class Task(BaseTask):
             f"on_plate_upright={on_plate_upright} hold={self._success_hold_count}/{SUCCESS_HOLD_STEPS}",
             flush=True,
         )
-        return bool(self._success_hold_count >= SUCCESS_HOLD_STEPS)
+        # 用我的判据: B 把杯放到盘上正立即成功(本任务 B 放盘【不松爪】, 不要求 released)。
+        return bool(on_plate_upright)

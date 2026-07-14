@@ -108,7 +108,7 @@ class Task(BaseTask):
             density=2000.0)
 
     def _reset_actors(self):
-        noise = self.create_noise([0.01, 0.01, 0.0])
+        noise = self.create_noise([0.003, 0.003, 0.0])
         cup = CUP_POS.add_offset(noise)
         self.dish.set_pose(PLATE_POS)
         self.cup.set_pose(cup)

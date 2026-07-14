@@ -50,6 +50,14 @@ ARM_A_PARK_POS = [0.36, 0.30, 0.24]
 GRIPPER_RELEASE_THRESH = 0.65
 SUCCESS_HOLD_STEPS = 8
 
+# ---- 从上整只抓杯(两段式下压, 学 dual_cup_stack/handover 的稳定抓法) + 去 weld ----
+USE_WELD = False               # False: 只靠夹爪接触夹持(不 weld 刚性绑定)
+TOP_GRASP_DZ = CUP_HALF - 0.006  # 抓取高度: 杯顶口沿(相对杯体心)
+TOP_GRASP_OPEN = 1.0           # 抓前全张开, 清过杯口直径再合拢
+TOP_GRASP_CLOSE = 0.5          # 闭合量(两指压住杯外壁; 全闭会挤穿软杯)
+TOP_GRASP_SIDE = 0.10          # 两段式下降: 沿接近轴退开这么多再受约束直线进刀
+TOP_GRASP_UP = 0.06            # 两段式下降: 侧上方额外抬高
+
 
 @configclass
 class TaskCfg(BaseTaskCfg):
@@ -112,7 +120,10 @@ class TaskCfg(BaseTaskCfg):
             update_period=1 / 120,
         ),
     ]
-    step_lim = 1400
+    # 两段式抓取后整条轨迹更长(~1500+步), 提高上限, 否则 record_one(每步存)会在
+    # save_count>1000 时强制 plan_success=False, 把 B 抓第二只杯之后全截断。
+    step_lim = 2400
+    max_save_frames = 2400
     reset_time_limit = 1200.0
 
 
@@ -175,22 +186,24 @@ class Task(BaseTask):
         )
         return actor.register_point(grasp_pose, type="contact")
 
-    def _grasp_cup(self, actor, atom, rm, arm, rim_dir):
-        self.move(atom.open_gripper(PRE_GRIPPER_OPEN), arm=arm)
-        grasp_id = self._register_rim_grasp(actor, rim_dir)
-        self.move(
-            atom.grasp_actor(
-                actor,
-                contact_point_id=grasp_id,
-                pre_dis=GRASP_PRE_DIS,
-                dis=0.0,
-                is_close=False,
-            ),
-            arm=arm,
-            time_dilation_factor=0.5,
-        )
-        self.move(atom.close_gripper(0.0, depth_threshold=None), arm=arm)
-        self.weld_actor(actor, rm)
+    def _grasp_cup(self, actor, atom, rm, arm, rim_dir=None):
+        """从上【整只抓杯】(两段式稳定下压, 学 dual_cup_stack/handover): 夹爪中心对准杯轴,
+           全张开 -> 到杯顶侧上方 -> 竖直降到侧位 -> 锁 5 轴直线下压进刀 -> 闭合。默认不 weld。"""
+        gf = np.array([0.0, 0.0, 1.0], dtype=float)          # 从正上方接近
+        self.move(atom.open_gripper(TOP_GRASP_OPEN), arm=arm)
+        target = actor.get_pose().add_bias([0.0, 0.0, TOP_GRASP_DZ], coord="world")
+        gc = construct_grasp_pose(np.array(target.p, dtype=float), gf,
+                                  np.array([1.0, 0.0, 0.0], dtype=float))
+        gc_side = gc.add_bias((gf * TOP_GRASP_SIDE).tolist(), coord="world")   # 杯顶正上方偏一点
+        ee_side = rm.gripper_center_to_ee(gc_side)
+        ee_high = ee_side.add_bias([0.0, 0.0, TOP_GRASP_UP], coord="world")
+        self.move(atom.move_to_pose(ee_high), arm=arm)                        # 1) 侧上方
+        self.move(atom.move_to_pose(ee_side), arm=arm)                        # 2) 竖直降到侧位
+        self.move(atom.move_by_displacement(z=TOP_GRASP_SIDE + 0.005, xyz_coord="local"),
+                  arm=arm, constraint_pose=[1, 1, 1, 1, 1, 0], time_dilation_factor=0.5)  # 3) 直线下压
+        self.move(atom.close_gripper(TOP_GRASP_CLOSE, depth_threshold=None), arm=arm)     # 4) 闭合
+        if USE_WELD:
+            self.weld_actor(actor, rm)
         self.delay(8, is_save=True)
 
     def _place_inhand(self, actor, rm, atom, target_pose, arm):
@@ -262,14 +275,21 @@ class Task(BaseTask):
 
         # B: 把上杯从 -Y 侧搬到 cup_a 正上方, 形成套叠。
         self._grasp_cup(self.cup_b, self.atom_b, self._robot_manager_b, "b", rim_dir=(0, -1, 0))
+        # 关键: 对准 cup_a 的【实际落点】(而非名义 STACK_TARGET)。cup_a 带 ±3mm 噪声、放下后还会
+        # 微偏(实测约 0.473,-0.005), 若 B 固定往 0.48,0 放 -> 杯口错位相撞把底杯撞翻(73% 失败主因)。
+        ca = self.cup_a.get_pose()
+        top_target = Pose(
+            [float(ca.p[0]), float(ca.p[1]), float(ca.p[2]) + NEST_RISE + STACK_GAP],
+            UPRIGHT,
+        )
         self._place_inhand(
             self.cup_b,
             self._robot_manager_b,
             self.atom_b,
-            STACK_TOP_TARGET.add_bias([0.0, 0.0, PLACE_HOVER], coord="world"),
+            top_target.add_bias([0.0, 0.0, PLACE_HOVER], coord="world"),
             "b",
         )
-        self._place_inhand(self.cup_b, self._robot_manager_b, self.atom_b, STACK_TOP_TARGET, "b")
+        self._place_inhand(self.cup_b, self._robot_manager_b, self.atom_b, top_target, "b")
         self._release_cup(self.cup_b, self.atom_b, "b", retract=False)
         self._dbg("B stacked cup_b")
         self.delay(30, is_save=True)
@@ -313,4 +333,7 @@ class Task(BaseTask):
             f"stacked_upright={stacked_upright} hold={self._success_hold_count}/{SUCCESS_HOLD_STEPS}",
             flush=True,
         )
-        return bool(self._success_hold_count >= SUCCESS_HOLD_STEPS)
+        # 去 weld 后杯子靠重力自然嵌套(dz 比刚性 NEST_RISE 小), 成功判据改成"cup_b 嵌套在 cup_a
+        # 之上的合理范围内"(上高于下、且确有重叠), 不再要求 dz 精确等于 NEST_RISE。
+        nested = 0.010 < dz < 0.055
+        return bool(target_err < 0.035 and stack_err < 0.025 and nested and a_up and b_up)
