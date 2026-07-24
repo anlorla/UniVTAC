@@ -180,7 +180,8 @@ class Task(BaseTask):
         self.metadata["rel_source"] = rel_source.tolist()
         inserted_target = (
             np.all(np.abs(rel_target.p[:2]) < np.array([0.005, 0.005]))
-            and rel_target.p[2] < 0.006
+            # ★修复(2026-07-14): 原 <0.006 太松, 插头悬孔口上方就误判"插入"; 改负阈值要求真插入
+            and rel_target.p[2] < -0.008
             and np.dot(rel_target.to_transformation_matrix()[:3, 2], np.array([0, 0, 1])) > 0.95
         )
         clear_source = abs(rel_source.p[2]) > 0.012 or np.linalg.norm(np.array(rel_source.p[:2])) > 0.02

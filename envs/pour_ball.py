@@ -189,11 +189,18 @@ class Task(BaseTask):
         px, py = PLATE_POS.p[0], PLATE_POS.p[1]
         horiz = float(np.linalg.norm(np.array([bp.p[0] - px, bp.p[1] - py])))
         bz = float(bp.p[2])
-        # 成功 = 球落在盘面半径内 且 贴在盘上(低高度)。
+        # 成功 = 球落在盘面半径内 且 贴在盘上(低高度) 且 已倒出杯子。
+        # ★修复(2026-07-14): 原判据只看球在盘区域+低, 不检查球是否离开杯; 机器人把杯(球还在里)
+        #   移到盘上方放低就误判成功+早停("还没倒出来")。加"球离开杯口"要求真倒出。
+        cup_p = self.cup.get_pose().p
+        ball_to_cup = float(np.linalg.norm(np.array([bp.p[0] - cup_p[0], bp.p[1] - cup_p[1]])))
         on_plate = horiz < PLATE_R - 0.005          # 落在盘内(留 5mm 余量)
         low = bz < 0.03                             # 贴在盘上(没卡在杯里/半空)
+        ball_out = ball_to_cup > CUP_TOP_R          # 球水平离开杯口 => 真倒出(非仍在杯内)
         self.metadata['ball_xyz'] = [float(v) for v in bp.p]
         self.metadata['ball_to_plate_horiz'] = horiz
+        self.metadata['ball_to_cup_horiz'] = ball_to_cup
         print(f"[POUR] ball=({bp.p[0]:.3f},{bp.p[1]:.3f},{bp.p[2]:.3f}) "
-              f"horiz={horiz*1000:.1f}mm on_plate={on_plate} low={low}", flush=True)
-        return bool(on_plate and low)
+              f"horiz={horiz*1000:.1f}mm to_cup={ball_to_cup*1000:.1f}mm "
+              f"on_plate={on_plate} low={low} ball_out={ball_out}", flush=True)
+        return bool(on_plate and low and ball_out)

@@ -1,8 +1,18 @@
 from ._base_task import *
 import numpy as np
+import os
 
 WRIST_TILT_DEG = -30.0  # pitch the wrist cam (about its optical X) down toward the gripper
 WRIST_FOCAL = 1.3       # smaller focal length than baseline (1.94) -> wider FOV (None = leave)
+
+# Fixed-cam variant switch. The wrist-cam tilt+wide-FOV adjustment below was added
+# 2026-07-04 (b375934) and until now ran UNCONDITIONALLY, so every collect/eval since
+# then used the "fixed cam" view. Data collected BEFORE that change used the ORIGINAL
+# wrist camera (no tilt, focal 1.94). Train/eval MUST use the SAME camera, so the
+# fixed-cam adjustment is now OPT-IN and kept distinct from the original:
+#   UNIVTAC_LIFT_CAN_FIXEDCAM=1  -> fixed cam (tilt -30° + focal 1.3)
+#   unset / 0 (default)          -> original wrist camera (pre-2026-07-04 behaviour)
+LIFT_CAN_FIXEDCAM = os.environ.get('UNIVTAC_LIFT_CAN_FIXEDCAM', '0') == '1'
 
 
 @configclass
@@ -14,7 +24,10 @@ class TaskCfg(BaseTaskCfg):
 class Task(BaseTask):
     def __init__(self, cfg: BaseTaskCfg, mode:Literal['collect', 'eval'] = 'collect', render_mode: str|None = None, **kwargs):
         super().__init__(cfg, mode, render_mode, **kwargs)
-        self._adjust_wrist_cam()
+        # OPT-IN: only apply the fixed-cam (tilt+wide) adjustment when explicitly
+        # enabled, so it stays distinct from the original wrist camera (see top-of-file).
+        if LIFT_CAN_FIXEDCAM:
+            self._adjust_wrist_cam()
 
     def _adjust_wrist_cam(self):
         # Tilt the wrist camera mount down toward the gripper (delta on the working pose)

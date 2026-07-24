@@ -120,8 +120,10 @@ class Task(BaseTask):
         self.delay(20, is_save=True)
 
     # ---------------------------------------------------------------- success
-    def check_success(self, z_threshold=0.006):
-        # 成功 = USB 相对孔口对正且插入到位
+    def check_success(self, z_threshold=-0.008):
+        # 成功 = USB 相对孔口对正且真正插入到位(z<0 才是插入; z=-0.011 插到底; -0.008≈73%深度)
+        # ★修复(2026-07-14): 原 z_threshold=+0.006 太松, USB 悬停孔口上方~5.5mm 就误判成功;
+        #   且一到孔口就 check_success 早停, 策略没机会下压。改负阈值要求真插入。
         usb_pose = self.usb.get_pose().rebase(self.hole_pose)
         self.metadata['rel_pose'] = usb_pose.tolist()
         return np.all(np.abs(usb_pose.p[0:2]) < np.array([0.005, 0.005])) \
