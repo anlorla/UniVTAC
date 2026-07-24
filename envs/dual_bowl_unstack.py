@@ -49,7 +49,7 @@ RIM_GRASP_DZ = BOWL_HALF - 0.006
 EXTRACT_RISE = 0.16                # 竖直抽出上碗的高度(再抬高些, 先明显脱离堆叠后再侧向搬运)
 RIM_DOWN_EXTRA = 0.020             # 竖直下探时再多压 20mm, 让胶垫更实地落到碗沿/内外壁上
 RELEASE_HOVER_Z = 0.16             # 放置区上方的明确悬停高度, 先到盘正上方再下放
-SUCCESS_HOLD_STEPS = 8             # 需连续 N 步维持"分离+双碗正立+落盘+松爪"才计成功(仿 cup_unstack)
+SUCCESS_HOLD_STEPS = 2             # 需连续 N 步维持"分离+双碗正立+落盘+松爪"才计成功(仿 cup_unstack)
 
 
 @configclass
@@ -148,6 +148,7 @@ class Task(BaseTask):
         self.bowl_b.set_pose(Pose([base.p[0], base.p[1], base.p[2] + NEST_RISE + NEST_GAP], UPRIGHT))
         self.metadata['plate_xy'] = [float(PLATE_POSE.p[0]), float(PLATE_POSE.p[1])]
         self._success_hold_count = 0
+        self._success_latched = False
 
     # ---------------------------------------------------------------- helpers
     def _grasp_rim(self, actor, rm, atom, arm, rim_dir=(0, 1, 0), camera_up=(1, 0, 0),
@@ -273,6 +274,7 @@ class Task(BaseTask):
         success_now = separated and bottom_ok and b_up and on_plate and released
         if success_now:
             self._success_hold_count = getattr(self, '_success_hold_count', 0) + 1
+            self._success_latched = True   # 任一步全条件满足即锁定成功(抗逐帧闪烁漏判)
         else:
             self._success_hold_count = 0
         self.metadata['bowl_a'] = [float(v) for v in ap.p]
@@ -286,4 +288,7 @@ class Task(BaseTask):
               f"a_up={a_up} b_up={b_up} on_plate={on_plate} separated={separated}", flush=True)
         print(f"[UNSTACK-REL] gripperA={pa:.2f} released={released} bottom_ok={bottom_ok} "
               f"hold={self._success_hold_count}/{SUCCESS_HOLD_STEPS}", flush=True)
-        return bool(self._success_hold_count >= SUCCESS_HOLD_STEPS)
+        # 锁存: 只要 episode 中 hold 曾达门槛就算成功(collect 末次判定会因逐帧闪烁漏判)。
+        if self._success_hold_count >= SUCCESS_HOLD_STEPS:
+            self._success_latched = True
+        return bool(getattr(self, '_success_latched', False))

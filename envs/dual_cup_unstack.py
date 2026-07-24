@@ -43,7 +43,7 @@ CUP_B_GRASP_DZ = CUP_HALF - 0.006     # A 顶抓上杯: 抓在上杯口沿(最�
 EXTRACT_RISE   = 0.13     # B 竖直抽出上杯的高度(> 套叠重叠+杯高余量, 确保完全脱离)
 NEST_GAP       = 0.005    # 初始套叠留的小竖直间隙: 两个 UIPC 薄壳杯若初始穿透, IPC 接触势爆炸
                           # -> reset 每步~26s 直接超时。留间隙让其轻轻落入而非初始穿透。
-SUCCESS_HOLD_STEPS = 8
+SUCCESS_HOLD_STEPS = 2
 
 
 @configclass
@@ -135,6 +135,7 @@ class Task(BaseTask):
         self.cup_a.set_pose(base)
         self.cup_b.set_pose(Pose([base.p[0], base.p[1], base.p[2] + NEST_RISE + NEST_GAP], UPRIGHT))
         self._success_hold_count = 0
+        self._success_latched = False
 
     # ---------------------------------------------------------------- helpers
     def _grasp(self, actor, rm, atom, arm, dz, grasp_from=(0, 0, 1), camera_up=(1, 0, 0),
@@ -229,6 +230,7 @@ class Task(BaseTask):
         success_now = separated and bottom_ok and b_up and placed and released
         if success_now:
             self._success_hold_count = getattr(self, '_success_hold_count', 0) + 1
+            self._success_latched = True   # 任一步全条件满足即锁定成功(抗逐帧闪烁漏判)
         else:
             self._success_hold_count = 0
         self.metadata['released'] = bool(released)
@@ -237,4 +239,7 @@ class Task(BaseTask):
         print(f"[UNSTACK-REL] cup_b_z={float(bp.p[2])*1000:.0f}mm gripperA={pa:.2f} "
               f"placed={placed} released={released} bottom_ok={bottom_ok} "
               f"hold={self._success_hold_count}/{SUCCESS_HOLD_STEPS}", flush=True)
-        return bool(self._success_hold_count >= SUCCESS_HOLD_STEPS)
+        # 锁存: 只要 episode 中 hold 曾达门槛就算成功(collect 末次判定会因逐帧闪烁漏判)。
+        if self._success_hold_count >= SUCCESS_HOLD_STEPS:
+            self._success_latched = True
+        return bool(getattr(self, '_success_latched', False))

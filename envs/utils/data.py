@@ -248,12 +248,16 @@ class VideoHandler:
         self.video_path.parent.mkdir(parents=True, exist_ok=True)
         self.video_size = video_size
         w, h = video_size
+        # 可用环境变量提清晰度/流畅度: UNIVTAC_VIDEO_FPS(默认10), UNIVTAC_VIDEO_CRF(默认23, 越小越清晰)。
+        fps = os.environ.get('UNIVTAC_VIDEO_FPS', '10')
+        crf = os.environ.get('UNIVTAC_VIDEO_CRF', '23')
         self.ffmpeg = subprocess.Popen([
             "ffmpeg", "-y", "-loglevel", "error",
             "-f", "rawvideo", "-pixel_format", "rgb24",
-            "-video_size", f"{w}x{h}", "-framerate", "10",
+            "-video_size", f"{w}x{h}", "-framerate", fps,
             "-i", "-", "-pix_fmt", "yuv420p",
-            "-vcodec", "libx264", "-crf", "23",
+            "-vcodec", "libx264", "-crf", crf,
+            "-preset", "slow",
             "-movflags", "+faststart",
             str(self.video_path)
         ], stdin=subprocess.PIPE)

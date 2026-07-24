@@ -232,7 +232,16 @@ class BaseTask(UipcRLEnv):
         #   particle -> gel_particle    (无 marker 的银灰 gel 视触觉图, 真实 FEM 表面位移驱动)
         # 触觉每列上下两个: 单臂 2 个 -> 1 列(160), 双臂 4 个 -> 2 列(320)。
         # 帧宽 = 480(head) + 160*列数 -> 单臂 640, 双臂 800; 高 320。同步改 video_size 否则会拉伸变形。
-        if os.environ.get('UNIVTAC_POSTER_VIEW', '0') == '1' or os.environ.get('UNIVTAC_PANEL', ''):
+        if os.environ.get('UNIVTAC_HQ', '0') == '1':
+            # 4K 高清模式: head 相机渲染成 16:9 高分辨率(默认 3840x2160), 整帧 = head 全画面 +
+            # particle/force 面板做画中画(PiP)。UNIVTAC_HQ_W/H 可覆盖分辨率。
+            hw = int(os.environ.get('UNIVTAC_HQ_W', 3840))
+            hh = int(os.environ.get('UNIVTAC_HQ_H', 2160))
+            for cam in cfg.cameras:
+                if getattr(cam, 'name', '') == 'head':
+                    cam.width, cam.height = hw, hh
+            cfg.video_size = (hw, hh)
+        elif os.environ.get('UNIVTAC_POSTER_VIEW', '0') == '1' or os.environ.get('UNIVTAC_PANEL', ''):
             cols = 2 if getattr(cfg, 'dual_arm', False) else 1
             cfg.video_size = (480 + 160 * cols, 320)
 
@@ -478,7 +487,15 @@ class BaseTask(UipcRLEnv):
             )
 
         if self.cfg.video_frequency > 0:
-            self.video_handler.reset(self.save_video_path, self.cfg.video_size)
+            if self._split_mode():
+                vdir = self.save_root / 'video'
+                self._split_handlers = {'head': VideoHandler()}
+                self._split_handlers['head'].reset(vdir / f'{self.cfg.seed}_head.mp4', self.cfg.video_size)
+                for _gel, label in self._split_gels():
+                    vh = VideoHandler(); vh.reset(vdir / f'{self.cfg.seed}_{label}.mp4', self._SPLIT_GEL_SIZE)
+                    self._split_handlers[label] = vh
+            else:
+                self.video_handler.reset(self.save_video_path, self.cfg.video_size)
         if instructions is not None:
             self.instruction = self.rng.choice(instructions)
         
@@ -611,6 +628,31 @@ class BaseTask(UipcRLEnv):
         tac_key = {'force': 'force_field_img', 'particle': 'gel_particle'}.get(panel, 'rgb_marker')
         head_only = poster or panel in ('force', 'particle')
 
+        # ---- 4K 高清模式(UNIVTAC_HQ=1): 整帧 = head 全画面(16:9 原生高分辨率, 不裁剪不变形),
+        #      触觉面板缩成小方块做画中画(PiP)钉在右下角(带白边)。 ----
+        if os.environ.get('UNIVTAC_HQ', '0') == '1' and panel in ('force', 'particle'):
+            head = obs['observation']['head']['rgb'].clone().to(torch.uint8)   # (H,W,3) 原生 4K
+            H, W = head.shape[:2]
+            tnames = [n for n in ['left_tactile', 'right_tactile', 'left_tactile_b', 'right_tactile_b']
+                      if n in obs['tactile']]
+            ps = max(160, H // 5)                    # 每个面板边长
+            bd = max(3, ps // 40)                    # 白边宽
+            gap = max(6, ps // 16)                   # 面板间隙 / 到边距
+            ncol = max(1, (len(tnames) + 1) // 2)    # 双臂4->2列, 单臂2->1列
+            grid_w = ncol * ps + (ncol - 1) * gap
+            grid_h = min(len(tnames), 2) * ps + (min(len(tnames), 2) - 1) * gap
+            x0 = W - grid_w - gap
+            y0 = H - grid_h - gap
+            for i, name in enumerate(tnames):
+                src = obs['tactile'][name][tac_key].clone().permute(2, 0, 1)
+                p = torchvision.transforms.Resize((ps, ps))(src).permute(1, 2, 0).to(torch.uint8)
+                col, row = i // 2, i % 2
+                px = x0 + col * (ps + gap)
+                py = y0 + row * (ps + gap)
+                head[py-bd:py+ps+bd, px-bd:px+ps+bd, :] = 255      # 白边
+                head[py:py+ps, px:px+ps, :] = p
+            return head
+
         def tac(name):
             src = obs['tactile'][name][tac_key].clone().permute(2, 0, 1)
             return torchvision.transforms.Resize((tac_size, tac_size))(src).permute(1, 2, 0).to(first.dtype)
@@ -635,6 +677,33 @@ class BaseTask(UipcRLEnv):
             col, row = i // 2, i % 2
             img[row*tac_size:(row+1)*tac_size, x_tac + col*tac_size: x_tac + (col+1)*tac_size, :] = tac(name)
         return img
+
+    # ---- 分开存视频(UNIVTAC_SPLIT=1): head 一路 + 每个 gel 单独一路, 文件名标注 left/right(_b) ----
+    _SPLIT_GEL_SIZE = (512, 512)   # 每个触觉视频尺寸 (W,H)
+
+    def _split_mode(self):
+        panel = os.environ.get('UNIVTAC_PANEL', '')
+        return os.environ.get('UNIVTAC_SPLIT', '0') == '1' and panel in ('force', 'particle')
+
+    def _split_gels(self):
+        # (obs 里的 gel 名, 文件名标注)。A 臂(+Y, 视频右侧)=right_arm, B 臂(-Y, 视频左侧)=left_arm;
+        # 每臂两指 = left/right。单臂只有 A(right_arm), 双臂再加 B(left_arm)。
+        gels = [('left_tactile', 'right_arm_left'), ('right_tactile', 'right_arm_right')]
+        if getattr(self.cfg, 'dual_arm', False):
+            gels += [('left_tactile_b', 'left_arm_left'), ('right_tactile_b', 'left_arm_right')]
+        return gels
+
+    def get_split_frames(self, obs):
+        # 返回 {标注: 帧}: 'head'=第三视角原生高清帧; 每个 gel=触觉可视化(缩到方形)。
+        panel = os.environ.get('UNIVTAC_PANEL', '')
+        tac_key = {'force': 'force_field_img', 'particle': 'gel_particle'}.get(panel, 'rgb_marker')
+        out = {'head': obs['observation']['head']['rgb'].clone().to(torch.uint8)}
+        gh, gw = self._SPLIT_GEL_SIZE[1], self._SPLIT_GEL_SIZE[0]
+        for gel, label in self._split_gels():
+            if gel in obs['tactile'] and tac_key in obs['tactile'][gel]:
+                src = obs['tactile'][gel][tac_key].clone().permute(2, 0, 1)
+                out[label] = torchvision.transforms.Resize((gh, gw))(src).permute(1, 2, 0).to(torch.uint8)
+        return out
 
     @staticmethod
     def _step_callback(status:dict):
@@ -725,7 +794,12 @@ class BaseTask(UipcRLEnv):
         if is_save and video_freq:
             if obs is None:
                 obs = self._get_observations()
-            self.video_handler.write(self.get_frame_shot(obs))
+            if self._split_mode():
+                for label, frame in self.get_split_frames(obs).items():
+                    if label in self._split_handlers:
+                        self._split_handlers[label].write(frame)
+            else:
+                self.video_handler.write(self.get_frame_shot(obs))
 
         step_mean_cost = 0.0
         step_cost = time.perf_counter() - self.last_step
@@ -802,7 +876,11 @@ class BaseTask(UipcRLEnv):
                 f.unlink()
             self.tmp_save_dir.rmdir()
         if self.cfg.video_frequency > 0:
-            self.video_handler.close(result)
+            if self._split_mode():
+                for vh in getattr(self, '_split_handlers', {}).values():
+                    vh.close(result)
+            else:
+                self.video_handler.close(result)
         if result is not None:
             self.metadata['cost_step'] = self.step_count
             self.metadata['cost_time'] = time.perf_counter() - self.start_time

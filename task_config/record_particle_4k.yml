@@ -1,0 +1,22 @@
+# 4K 超清 particle demo: 整帧 = head 第三视角(16:9 原生 4K) + particle 面板画中画(PiP)。
+# 必须配全套环境变量:
+#   UNIVTAC_PANEL=particle UNIVTAC_HQ=1 UNIVTAC_VIDEO_FPS=30 UNIVTAC_VIDEO_CRF=16 \
+#     python scripts/collect_data.py <task> record_particle_4k
+# 输出: data/<task>/record_particle_4k/video/<seed>_success.mp4  (3840x2160, 30fps)
+save_dir: ./data
+decimation: 1
+save_frequency: 30        # 只求视频, hdf5 存得极稀(仅副产物; 4K 帧大, 别多存)
+video_frequency: 1        # 每一步都录 -> 最顺滑不卡顿
+render_frequency: 0
+random_texture: false
+use_seed: true
+dense_gelpad: false
+episode_num: 1
+start_seed: 0
+max_seed: 30
+sensor_type: gsmini
+observations:
+  camera: ['rgb']
+  tactile: ['gel_particle']
+  embodiment: ['joint', 'ee']
+  actor: true
